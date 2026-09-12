@@ -48,9 +48,9 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Account profile not found.' });
     }
 
-    const role = String(profile.role ?? 'RESIDENT');
-    if (!['BARANGAY_OFFICIAL', 'LGU_ADMIN'].includes(role)) {
-      return res.status(403).json({ error: 'This account is not authorized for the LigTAS web dashboard.' });
+        const role = String(profile.role ?? 'RESIDENT');
+    if (role !== 'LGU_ADMIN') {
+      return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can access the LigTAS web dashboard.' });
     }
 
     return res.json({

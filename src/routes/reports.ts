@@ -107,3 +107,65 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
 });
 
 export default router;
+
+// POST /reports — para sa officials na direktang magsumite ng report mula sa web
+router.post('/', async (req: AuthenticatedRequest, res) => {
+  const { type, location, description, waterLevel, roadStatus, floodingLevel, cause, barangayId } = req.body ?? {};
+
+  if (!type || !location || !description) {
+    return res.status(400).json({ error: 'type, location, and description are required.' });
+  }
+  if (!['flood', 'road'].includes(type)) {
+    return res.status(400).json({ error: 'type must be flood or road.' });
+  }
+
+  const targetBarangayId = req.user!.role === 'LGU_ADMIN' ? (barangayId ?? null) : req.user!.barangayId;
+
+  try {
+    const now = new Date();
+    const baseData: Record<string, any> = {
+      type,
+      reportType: type,
+      location: String(location).trim(),
+      description: String(description).trim(),
+      status: 'Verified',
+      verification: 'Verified',
+      submittedByOfficial: true,
+      reporterId: req.user!.uid,
+      reporterName: req.user!.name,
+      createdByRole: req.user!.role,
+      barangayId: targetBarangayId,
+      verifiedBy: req.user!.uid,
+      verifiedByName: req.user!.name,
+      verifiedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    if (type === 'flood') {
+      baseData.waterLevel = waterLevel ?? 'Not specified';
+    } else {
+      baseData.roadStatus = roadStatus ?? 'Not specified';
+      baseData.floodingLevel = floodingLevel ?? 'Not specified';
+      baseData.cause = cause ?? 'Not specified';
+    }
+
+    const docRef = await db.collection('reports').add(baseData);
+
+    await logAction({
+      actorId: req.user!.uid,
+      actorName: req.user!.name,
+      actorRole: req.user!.role,
+      action: 'report_submitted_by_official',
+      targetType: 'report',
+      targetId: docRef.id,
+      details: { type, location },
+    });
+
+    const created = await docRef.get();
+    res.status(201).json({ data: { id: created.id, ...created.data() } });
+  } catch (error) {
+    console.error('Submit report failed:', error);
+    res.status(500).json({ error: 'Failed to submit report.' });
+  }
+});
