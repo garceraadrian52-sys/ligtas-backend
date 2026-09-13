@@ -18,6 +18,12 @@ import supportRoutes from './routes/support';
 import auditLogsRoutes from './routes/auditLogs';
 import accessRequestsRoutes from './routes/accessRequests';
 
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection (server stays alive):', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception (server stays alive):', error);
+});
 
 const app = express();
 app.use(cors());

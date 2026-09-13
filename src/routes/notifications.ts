@@ -22,14 +22,53 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// GET /notifications/preview — halimbawa/preview lang, hindi galing sa totoong deliveries
+// GET /notifications/preview — top notifications, sa shape na tugma sa web UI (array ng tuples)
 router.get('/preview', async (req: AuthenticatedRequest, res) => {
-  res.json({
-    data: {
-      title: 'Sample Notification',
-      body: 'This is a preview of how a notification will appear.',
-    },
-  });
+  try {
+    const snapshot = await db.collection('notificationDeliveries')
+      .where('userId', '==', req.user!.uid)
+      .orderBy('createdAt', 'desc')
+      .limit(4)
+      .get();
+
+    const preview = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      const createdAt = data.createdAt?.toDate ? data.createdAt.toDate() : new Date(data.createdAt ?? Date.now());
+      const minutesAgo = Math.max(0, Math.round((Date.now() - createdAt.getTime()) / 60000));
+      const timeLabel = minutesAgo < 60 ? `${minutesAgo} minutes ago` : `${Math.round(minutesAgo / 60)} hours ago`;
+
+      return [
+        data.title ?? 'Notification',
+        data.body ?? '',
+        timeLabel,
+        !data.read,
+      ];
+    });
+
+    res.json({ data: preview });
+  } catch (error) {
+    console.error('Get notification preview failed:', error);
+    res.status(500).json({ error: 'Failed to load notification preview.' });
+  }
+});
+
+// PATCH /notifications/read-all — DAPAT NASA ITAAS BAGO ANG /:id
+router.patch('/read-all', async (req: AuthenticatedRequest, res) => {
+  try {
+    const snapshot = await db.collection('notificationDeliveries')
+      .where('userId', '==', req.user!.uid)
+      .where('read', '!=', true)
+      .get();
+
+    const batch = db.batch();
+    snapshot.docs.forEach((doc) => batch.update(doc.ref, { read: true, readAt: new Date() }));
+    await batch.commit();
+
+    res.json({ data: { updated: snapshot.size } });
+  } catch (error) {
+    console.error('Mark all read failed:', error);
+    res.status(500).json({ error: 'Failed to mark notifications as read.' });
+  }
 });
 
 // PATCH /notifications/:id — mark as read
@@ -48,25 +87,6 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
   } catch (error) {
     console.error('Update notification failed:', error);
     res.status(500).json({ error: 'Failed to update notification.' });
-  }
-});
-
-// PATCH /notifications/read-all
-router.patch('/read-all', async (req: AuthenticatedRequest, res) => {
-  try {
-    const snapshot = await db.collection('notificationDeliveries')
-      .where('userId', '==', req.user!.uid)
-      .where('read', '!=', true)
-      .get();
-
-    const batch = db.batch();
-    snapshot.docs.forEach((doc) => batch.update(doc.ref, { read: true, readAt: new Date() }));
-    await batch.commit();
-
-    res.json({ data: { updated: snapshot.size } });
-  } catch (error) {
-    console.error('Mark all read failed:', error);
-    res.status(500).json({ error: 'Failed to mark notifications as read.' });
   }
 });
 

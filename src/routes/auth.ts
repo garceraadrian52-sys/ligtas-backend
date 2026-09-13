@@ -53,9 +53,9 @@ router.post('/login', async (req, res) => {
       return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can access the LigTAS web dashboard.' });
     }
 
-    return res.json({
-      token: signInData.idToken,
+        return res.json({
       data: {
+        token: signInData.idToken,
         user: {
           id: uid,
           name: profile.name ?? profile.displayName ?? '',
