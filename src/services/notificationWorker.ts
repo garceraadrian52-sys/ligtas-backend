@@ -8,9 +8,9 @@ const now = () => Timestamp.now();
 const later = (ms: number) => Timestamp.fromMillis(Date.now() + ms);
 const deliveries = db.collection('notificationDeliveries');
 
-async function queueForUser(uid: string, payload: any, revision: string) {
-  const profileSnap = await db.doc(`users/${uid}`).get();
-  const profile = profileSnap.data();
+// Tumatanggap ng pre-fetched na profile (opsyonal) para maiwasan ang duplicate read
+async function queueForUser(uid: string, payload: any, revision: string, knownProfile?: any) {
+  const profile = knownProfile ?? (await db.doc(`users/${uid}`).get()).data();
   if (!profile || !enabled(profile, payload.kind)) {
     console.log(`Skipping user ${uid}: profile=${!!profile}, enabled=${profile ? enabled(profile, payload.kind) : 'n/a'}`);
     return;
@@ -65,6 +65,7 @@ function startAlertWatcher() {
 
       const kind = kindForAlert(alert);
       const revision = alertRevision(change.doc.id, alert);
+      const senderName = alert.createdByName || 'LGU/MDRRMO';
       let cursor;
       let usersChecked = 0;
       while (true) {
@@ -80,8 +81,8 @@ function startAlertWatcher() {
             await queueForUser(user.id, {
               kind, targetId: change.doc.id, sourcePath: change.doc.ref.path, revision,
               title: String(alert.title ?? 'LigTAS advisory').slice(0, 100),
-              body: String(alert.message ?? alert.description ?? '').slice(0, 500),
-            }, `alert:${revision}`);
+              body: `${String(alert.message ?? alert.description ?? '').slice(0, 460)} — ${senderName}`,
+            }, `alert:${revision}`, userData);
           }
         }
         if (page.size < 200) break;
@@ -116,9 +117,10 @@ function startReportWatcher() {
 
       console.log(`Report ${change.doc.id} status changed to ${status}, notifying reporter ${report.reporterId}`);
 
+      const reviewerName = report.verifiedByName || report.reviewedByName || 'a barangay official';
       await queueForUser(report.reporterId, {
         kind: 'report', targetId: change.doc.id, sourcePath: change.doc.ref.path,
-        expectedStatus: status, title: 'Report Update', body: `Your report was ${status}. Open LigTAS for details.`,
+        expectedStatus: status, title: 'Report Update', body: `Your report was ${status} by ${reviewerName}. Open LigTAS for details.`,
       }, `report:${change.doc.id}:${Date.now()}`);
     }
   }, (error) => console.error('Report watcher failed:', error));
@@ -146,9 +148,10 @@ function startHouseholdRequestWatcher() {
 
       console.log(`Household request ${change.doc.id} decided: ${request.status}, notifying user ${request.userId}`);
 
+      const deciderName = request.decidedByName || 'the household head';
       await queueForUser(request.userId, {
         kind: 'household', targetId: request.householdId, sourcePath: change.doc.ref.path,
-        expectedStatus: request.status, title: 'Household Request', body: `Your household membership request was ${request.status.toLowerCase()}.`,
+        expectedStatus: request.status, title: 'Household Request', body: `Your household membership request was ${request.status.toLowerCase()} by ${deciderName}.`,
       }, `household:${change.doc.id}:${Date.now()}`);
     }
   }, (error) => console.error('Household request watcher failed:', error));
@@ -251,14 +254,14 @@ function startDeliveryWorker() {
     }
   }, (error) => console.error('Delivery watcher failed:', error));
 
-  // Retry/receipt sweep bawat 1 minuto (kapalit ng onSchedule 'every 1 minutes')
+  // Retry/receipt sweep — 5 minuto para makatipid ng Firestore reads
   setInterval(async () => {
     const due = await deliveries.where('nextAttemptAt', '<=', now()).orderBy('nextAttemptAt').limit(25).get();
     if (due.size > 0) console.log(`Sweep: processing ${due.size} due deliver(y/ies).`);
     for (const item of due.docs) {
       await processDelivery(item.ref).catch((error) => console.error('scheduled processDelivery failed:', error));
     }
-  }, 60 * 1000);
+  }, 5 * 60 * 1000);
 
   // Cleanup ng lumang records bawat 24 oras (kapalit ng onSchedule 'every 24 hours')
   setInterval(async () => {
