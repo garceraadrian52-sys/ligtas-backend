@@ -17,7 +17,7 @@ router.post('/login', async (req, res) => {
   const { identifier, email: emailField, password } = req.body ?? {};
   const email = identifier ?? emailField;
 
-  if (!email || !password) {
+  if (typeof email !== 'string' || !email.trim() || email.length > 320 || typeof password !== 'string' || !password || password.length > 4096) {
     return res.status(400).json({ error: 'Email and password are required.' });
   }
   if (!FIREBASE_WEB_API_KEY) {
@@ -29,8 +29,9 @@ router.post('/login', async (req, res) => {
       `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_WEB_API_KEY}`,
       {
         method: 'POST',
+        signal: AbortSignal.timeout(15000),
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, returnSecureToken: true }),
+        body: JSON.stringify({ email: email.trim(), password, returnSecureToken: true }),
       },
     );
     const signInData: any = await signInResponse.json();
@@ -67,7 +68,7 @@ router.post('/login', async (req, res) => {
     });
   } catch (error) {
     console.error('Login failed:', error);
-    return res.status(500).json({ error: 'Login failed. Please try again.' });
+    return res.status(503).json({ error: 'Sign-in is temporarily unavailable. Please try again.' });
   }
 });
 

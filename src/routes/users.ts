@@ -3,6 +3,7 @@ import { auth, db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { logAction } from '../services/auditLog';
 
+import { validText, validDocumentId } from '../services/inputValidation';
 const router = Router();
 router.use(requireAuth, requireOfficial);
 
@@ -28,7 +29,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
 router.post('/', async (req: AuthenticatedRequest, res) => {
   const { email, name, role, barangayId, password } = req.body ?? {};
 
-  if (!email || !name || !role || !password) {
+  if (!validText(email, 320) || !validText(name, 200) || !validText(password, 4096) || !role) {
     return res.status(400).json({ error: 'email, name, role, and password are required.' });
   }
   if (!['BARANGAY_OFFICIAL', 'LGU_ADMIN'].includes(role)) {
@@ -37,12 +38,15 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   if (req.user!.role !== 'LGU_ADMIN') {
     return res.status(403).json({ error: 'Only LGU admins can create accounts.' });
   }
+  if (role === 'BARANGAY_OFFICIAL' && !validDocumentId(barangayId)) return res.status(400).json({ error: 'A valid barangay assignment is required for officials.' });
+  if (barangayId != null && !validDocumentId(barangayId)) return res.status(400).json({ error: 'Invalid barangay ID.' });
   if (password.length < 12) {
     return res.status(400).json({ error: 'Password must be at least 12 characters.' });
   }
 
   try {
-    const userRecord = await auth.createUser({ email, password, displayName: name });
+    if (barangayId && !(await db.doc('barangays/' + barangayId).get()).exists) return res.status(400).json({ error: 'Barangay does not exist.' });
+    const userRecord = await auth.createUser({ email: email.trim(), password, displayName: name.trim() });
 
     await db.doc(`users/${userRecord.uid}`).set({
       name,

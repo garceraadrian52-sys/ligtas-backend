@@ -3,7 +3,9 @@ import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { logAction } from '../services/auditLog';
 
+import { validText, validDocumentId, validCoordinatePair } from '../services/inputValidation';
 const router = Router();
+router.param('id', (_req, res, next, id) => { if (!validDocumentId(id)) { res.status(400).json({ error: 'Invalid report ID.' }); return; } next(); });
 router.use(requireAuth, requireOfficial);
 
 // GET /reports
@@ -77,6 +79,10 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
         updates.verifiedAt = new Date();
       }
 
+      if (status === 'Pending' || status === 'Rejected') {
+        updates.verifiedBy = null; updates.verifiedByName = null; updates.verifiedAt = null;
+      }
+      updates.resolvedAt = status === 'Resolved' ? new Date() : null;
       transaction.update(reportRef, updates);
 
       if (roadRef && roadSnap?.exists) {
@@ -110,18 +116,22 @@ export default router;
 
 // POST /reports — para sa officials na direktang magsumite ng report mula sa web
 router.post('/', async (req: AuthenticatedRequest, res) => {
-  const { type, location, description, waterLevel, roadStatus, floodingLevel, cause, barangayId } = req.body ?? {};
+  const { type, location, description, waterLevel, roadStatus, floodingLevel, cause, barangayId, latitude, longitude } = req.body ?? {};
 
-  if (!type || !location || !description) {
+  if (!validText(location, 300) || !validText(description, 5000)) {
     return res.status(400).json({ error: 'type, location, and description are required.' });
   }
   if (!['flood', 'road'].includes(type)) {
     return res.status(400).json({ error: 'type must be flood or road.' });
   }
 
+  if (!validCoordinatePair(latitude, longitude)) return res.status(400).json({ error: 'Enter valid latitude and longitude together.' });
+  if ([waterLevel, roadStatus, floodingLevel, cause].some(value => value != null && !validText(value, 300))) return res.status(400).json({ error: 'Report details must be text of at most 300 characters.' });
+  if (barangayId != null && !validDocumentId(barangayId)) return res.status(400).json({ error: 'Invalid barangay ID.' });
   const targetBarangayId = req.user!.role === 'LGU_ADMIN' ? (barangayId ?? null) : req.user!.barangayId;
 
   try {
+    if (targetBarangayId && !(await db.doc('barangays/' + targetBarangayId).get()).exists) return res.status(400).json({ error: 'Barangay does not exist.' });
     const now = new Date();
     const baseData: Record<string, any> = {
       type,
@@ -135,6 +145,8 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       reporterName: req.user!.name,
       createdByRole: req.user!.role,
       barangayId: targetBarangayId,
+      latitude: latitude ?? null,
+      longitude: longitude ?? null,
       verifiedBy: req.user!.uid,
       verifiedByName: req.user!.name,
       verifiedAt: now,

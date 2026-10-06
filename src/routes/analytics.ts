@@ -7,6 +7,7 @@ router.use(requireAuth, requireOfficial);
 
 // GET /analytics/reports
 router.get('/reports', async (req: AuthenticatedRequest, res) => {
+  if (req.user!.role !== 'LGU_ADMIN' && !req.user!.barangayId) return res.status(403).json({ error: 'A barangay assignment is required.' });
   try {
     const reportsRef = db.collection('reports');
     const query = req.user!.role === 'LGU_ADMIN'
@@ -17,15 +18,16 @@ router.get('/reports', async (req: AuthenticatedRequest, res) => {
 
     const byStatus: Record<string, number> = { Pending: 0, Verified: 0, Rejected: 0, Resolved: 0 };
     const byType: Record<string, number> = { flood: 0, road: 0 };
-    const byBarangay: Record<string, number> = {};
+    const byBarangay: Record<string, number> = Object.create(null);
 
     snapshot.docs.forEach((doc) => {
       const data = doc.data();
-      const status = String(data.verification ?? data.status ?? 'Pending');
-      if (status in byStatus) byStatus[status] += 1;
+      const rawStatus = String(data.verification ?? data.status ?? 'Pending').toLowerCase();
+      const status = rawStatus.charAt(0).toUpperCase() + rawStatus.slice(1);
+      if (Object.prototype.hasOwnProperty.call(byStatus, status)) byStatus[status] += 1;
 
       const type = String(data.type ?? data.reportType ?? 'flood').toLowerCase();
-      if (type in byType) byType[type] += 1;
+      if (Object.prototype.hasOwnProperty.call(byType, type)) byType[type] += 1;
 
       const barangay = String(data.barangayId ?? 'unassigned');
       byBarangay[barangay] = (byBarangay[barangay] ?? 0) + 1;

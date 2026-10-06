@@ -11,7 +11,8 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     return res.status(401).json({ error: 'Missing or invalid Authorization header.' });
   }
 
-  const idToken = header.slice(7);
+  const idToken = header.slice(7).trim();
+  if (!idToken) return res.status(401).json({ error: 'Missing or invalid Authorization header.' });
   try {
     const decoded = await auth.verifyIdToken(idToken);
     const profileSnap = await db.doc(`users/${decoded.uid}`).get();
@@ -26,14 +27,20 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       email: profile.email ?? decoded.email ?? '',
     };
     next();
-  } catch (error) {
-    return res.status(401).json({ error: 'Invalid or expired token.' });
+  } catch (error: any) {
+    const invalidTokenCodes = ['auth/argument-error', 'auth/invalid-id-token', 'auth/id-token-expired', 'auth/id-token-revoked', 'auth/user-disabled', 'auth/user-not-found'];
+    if (invalidTokenCodes.includes(error?.code)) return res.status(401).json({ error: 'Invalid or expired token.' });
+    console.error('Authentication dependency unavailable:', error?.code ?? 'unknown');
+    return res.status(503).json({ error: 'Sign-in verification is temporarily unavailable. Please try again.' });
   }
 }
 
 export function requireOfficial(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   if (!req.user || !['BARANGAY_OFFICIAL', 'LGU_ADMIN'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Only barangay officials or LGU admins can access this.' });
+  }
+  if (req.user.role === 'BARANGAY_OFFICIAL' && (typeof req.user.barangayId !== 'string' || !req.user.barangayId.trim())) {
+    return res.status(403).json({ error: 'A barangay assignment is required. Contact your LGU administrator.' });
   }
   next();
 }

@@ -17,15 +17,12 @@ import settingsRoutes from './routes/settings';
 import supportRoutes from './routes/support';
 import auditLogsRoutes from './routes/auditLogs';
 import accessRequestsRoutes from './routes/accessRequests';
+import { requireAuth, requireOfficial } from './middleware/auth';
 
-process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled rejection (server stays alive):', reason);
-});
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception (server stays alive):', error);
-});
+import { notFound, errorHandler } from './middleware/errorHandler';
 
-const app = express();
+export const app = express();
+app.disable('x-powered-by');
 app.use(cors());
 app.use(express.json());
 app.use('/auth', authRoutes);
@@ -45,21 +42,36 @@ app.use('/access-requests', accessRequestsRoutes);
 
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', message: 'LigTAS backend is running' });
+  res.json({
+    status: 'ok',
+    message: 'LigTAS backend is running',
+    database: 'not_checked',
+    notificationWorkersEnabled: process.env.ENABLE_NOTIFICATION_WORKERS === 'true',
+  });
 });
 
 // Test route — kumpirma na gumagana ang Admin SDK connection
-app.get('/test-firestore', async (_req, res) => {
+app.get('/test-firestore', requireAuth, requireOfficial, async (_req, res) => {
   try {
     const snapshot = await db.collection('barangays').limit(1).get();
     res.json({ connected: true, docsFound: snapshot.size });
   } catch (error) {
-    res.status(500).json({ connected: false, error: String(error) });
+    res.status(503).json({ connected: false, error: 'Firestore connection could not be verified.' });
   }
 });
 
-const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`LigTAS backend running on http://localhost:${PORT}`);
-  startNotificationWorkers();
-});
+app.use(notFound);
+app.use(errorHandler);
+
+if (require.main === module) {
+  const port = Number(process.env.PORT || 4000);
+  const host = process.env.HOST || '127.0.0.1';
+  app.listen(port, host, () => {
+    console.log(`LigTAS backend running on http://${host}:${port}`);
+    if (process.env.ENABLE_NOTIFICATION_WORKERS === 'true') {
+      startNotificationWorkers();
+    } else {
+      console.log('Notification workers disabled. HTTP health does not verify Firebase credentials.');
+    }
+  });
+}

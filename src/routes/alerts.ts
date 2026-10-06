@@ -3,7 +3,9 @@ import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { logAction } from '../services/auditLog';
 
+import { validDocumentId } from '../services/inputValidation';
 const router = Router();
+router.param('id', (_req, res, next, id) => { if (!validDocumentId(id)) { res.status(400).json({ error: 'Invalid alert ID.' }); return; } next(); });
 router.use(requireAuth, requireOfficial);
 
 const barangayNames: Record<string, string> = {
@@ -66,9 +68,13 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   }
 
   const { category, priority, title, message, barangayIds, publish } = req.body ?? {};
-  if (!category || !priority || !title || !message) {
+  if (![category, title, message].every(value => typeof value === 'string' && value.trim()) || !['Critical', 'High', 'Normal'].includes(priority)) {
     return res.status(400).json({ error: 'category, priority, title, and message are required.' });
   }
+
+  if (title.length > 160 || message.length > 5000 || category.length > 100) return res.status(400).json({ error: 'Use at most 160 characters for the title and 5000 for the message.' });
+  if (publish !== undefined && typeof publish !== 'boolean') return res.status(400).json({ error: 'publish must be a boolean.' });
+  if (barangayIds !== undefined && (!Array.isArray(barangayIds) || barangayIds.some(id => typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(barangayNames, id)))) return res.status(400).json({ error: 'Select valid barangay target areas.' });
 
   try {
     const validBarangayIds = Array.isArray(barangayIds)
@@ -130,13 +136,21 @@ router.patch('/:id/publish', async (req: AuthenticatedRequest, res) => {
 
   try {
     const alertRef = db.doc(`alerts/${req.params.id}`);
-    const snapshot = await alertRef.get();
-    if (!snapshot.exists) return res.status(404).json({ error: 'Alert not found.' });
-
-    await alertRef.update({ status: 'active', publishedAt: new Date(), updatedAt: new Date() });
-
-        const updated = await alertRef.get();
-    const updatedData = updated.data()!;
+    const result = await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(alertRef);
+      if (!snapshot.exists) throw new Error('NOT_FOUND');
+      const data = snapshot.data()!;
+      const status = String(data.status ?? '').toLowerCase();
+      if (status === 'active' || status === 'published') return { changed: false, data };
+      if (status !== 'draft') throw new Error('INVALID_STATE');
+      const now = new Date();
+      const updates = { status: 'active', publishedAt: now, updatedAt: now };
+      transaction.update(alertRef, updates);
+      return { changed: true, data: { ...data, ...updates } };
+    });
+    const updated = { id: alertRef.id };
+    const updatedData = result.data;
+    if (!result.changed) return res.json({ data: { ...updatedData, id: updated.id } });
 
     await logAction({
       actorId: req.user!.uid,
@@ -149,7 +163,9 @@ router.patch('/:id/publish', async (req: AuthenticatedRequest, res) => {
     });
 
     res.json({ data: { id: updated.id, ...updatedData } });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.message === 'NOT_FOUND') return res.status(404).json({ error: 'Alert not found.' });
+    if (error.message === 'INVALID_STATE') return res.status(409).json({ error: 'Only draft alerts can be published.' });
     console.error('Publish alert failed:', error);
     res.status(500).json({ error: 'Failed to publish alert.' });
   }

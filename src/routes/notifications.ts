@@ -5,6 +5,22 @@ import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 const router = Router();
 router.use(requireAuth);
 
+// One owner-scoped snapshot keeps the badge and newest 100 items consistent.
+// Missing read fields in older delivery records count as unread.
+router.get('/inbox', async (req: AuthenticatedRequest, res) => {
+  try {
+    const snapshot = await db.collection('notificationDeliveries').where('userId', '==', req.user!.uid)
+      .select('title', 'body', 'description', 'kind', 'type', 'createdAt', 'read').get();
+    const items = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+    const milliseconds = (value: any) => value?.toMillis?.() ?? (value?.seconds ? value.seconds * 1000 : Date.parse(value) || 0);
+    items.sort((a: any, b: any) => milliseconds(b.createdAt) - milliseconds(a.createdAt) || a.id.localeCompare(b.id));
+    res.json({data: {items: items.slice(0, 100), unreadCount: items.filter((item: any) => item.read !== true).length}});
+  } catch (error) {
+    console.error('Load inbox failed:', error);
+    res.status(500).json({error: 'Failed to load notifications.'});
+  }
+});
+
 // GET /notifications — deliveries na naka-address sa naka-login na user
 router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
@@ -57,14 +73,15 @@ router.patch('/read-all', async (req: AuthenticatedRequest, res) => {
   try {
     const snapshot = await db.collection('notificationDeliveries')
       .where('userId', '==', req.user!.uid)
-      .where('read', '!=', true)
       .get();
 
-    const batch = db.batch();
-    snapshot.docs.forEach((doc) => batch.update(doc.ref, { read: true, readAt: new Date() }));
-    await batch.commit();
-
-    res.json({ data: { updated: snapshot.size } });
+    const unread = snapshot.docs.filter(doc => doc.data().read !== true);
+    for (let offset = 0; offset < unread.length; offset += 450) {
+      const batch = db.batch();
+      unread.slice(offset, offset + 450).forEach(doc => batch.update(doc.ref, {read: true, readAt: new Date()}));
+      await batch.commit();
+    }
+    res.json({data: {updated: unread.length}});
   } catch (error) {
     console.error('Mark all read failed:', error);
     res.status(500).json({ error: 'Failed to mark notifications as read.' });
