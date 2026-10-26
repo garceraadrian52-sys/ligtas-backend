@@ -52,6 +52,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
 
   try {
     const reportRef = db.doc(`reports/${req.params.id}`);
+    let changed = false;
 
     await db.runTransaction(async (transaction) => {
       const snapshot = await transaction.get(reportRef);
@@ -62,17 +63,25 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
         throw new Error('FORBIDDEN');
       }
 
+      // Retrying the same decision must not restart measured response times.
+      if (data.status === status && data.verification === status) { changed = false; return; }
+      const knownStatus = ['pending','verified','approved','rejected','denied','resolved'].includes(String(data.status).toLowerCase()) ? data.status : data.verification;
+      const currentStatus = String(knownStatus ?? '').toLowerCase();
+      if (status === 'Resolved' && !['verified','approved','resolved'].includes(currentStatus)) throw new Error('NOT_VERIFIED');
+
       const roadRef = data.roadConditionId ? db.doc(`roadConditions/${data.roadConditionId}`) : null;
       const roadSnap = roadRef ? await transaction.get(roadRef) : null;
 
       const updates: Record<string, any> = {
         status,
         verification: status,
-        reviewedBy: req.user!.uid,
-        reviewedByName: req.user!.name,
-        reviewedAt: new Date(),
         updatedAt: new Date(),
       };
+      if (status === 'Verified' || status === 'Rejected') {
+        updates.reviewedBy = req.user!.uid;
+        updates.reviewedByName = req.user!.name;
+        updates.reviewedAt = new Date();
+      }
       if (status === 'Verified') {
         updates.verifiedBy = req.user!.uid;
         updates.verifiedByName = req.user!.name;
@@ -82,18 +91,22 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
       if (status === 'Pending' || status === 'Rejected') {
         updates.verifiedBy = null; updates.verifiedByName = null; updates.verifiedAt = null;
       }
-      updates.resolvedAt = status === 'Resolved' ? new Date() : null;
+      if (status === 'Pending') {
+        updates.reviewedBy = null; updates.reviewedByName = null; updates.reviewedAt = null;
+      }
+      updates.resolvedAt = status === 'Resolved' ? (currentStatus === 'resolved' ? data.resolvedAt ?? null : new Date()) : null;
       transaction.update(reportRef, updates);
+      changed = true;
 
       if (roadRef && roadSnap?.exists) {
-        transaction.update(roadRef, { verification: status, reportStatus: status, updatedAt: new Date() });
+        transaction.update(roadRef, { verification: status, reportStatus: status, resolvedAt: updates.resolvedAt, updatedAt: new Date() });
       }
     });
 
         const updated = await reportRef.get();
     const updatedData = updated.data()!;
 
-    await logAction({
+    if (changed) await logAction({
       actorId: req.user!.uid,
       actorName: req.user!.name,
       actorRole: req.user!.role,
@@ -107,6 +120,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
   } catch (error: any) {
     if (error.message === 'NOT_FOUND') return res.status(404).json({ error: 'Report not found.' });
     if (error.message === 'FORBIDDEN') return res.status(403).json({ error: 'This report belongs to another barangay.' });
+    if (error.message === 'NOT_VERIFIED') return res.status(409).json({ error: 'Verify the report before marking it resolved.' });
     console.error('Update report failed:', error);
     res.status(500).json({ error: 'Failed to update report.' });
   }

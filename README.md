@@ -2,6 +2,91 @@
 
 Express API and optional notification worker for the LigTAS Firebase project.
 
+## Balagtas monitoring and resolution update — 26 October 2026
+
+- `GET /dashboard` now includes `waterTrend`, built from the same authorized
+  report snapshot. Stored incident coordinates must lie inside the existing
+  Balagtas polygon. The rolling window is the preceding 24 hours. Only verified
+  or resolved observations are included. Missing coordinates, timestamps and
+  categories are excluded, rather than assigned zero values.
+- Flood body-depth categories and road-flooding categories are returned as
+  separate series. The frontend selects one scale at a time. Each hour contains
+  its highest reported category; missing hours remain gaps. This is a report
+  observation chart, not a measured river-level feed. A Balagtas gauge source
+  is still needed for metre measurements.
+- `GET /dashboard/weather` requires the same official access as the dashboard
+  and requests only the fixed target 14.8187,120.9054 in Balagtas. No location
+  supplied by the caller overrides it. Open-Meteo provides weather-model data,
+  not municipal station observations; its grid cell may extend outside town.
+  The service validates units/timestamps, coalesces concurrent requests, caches
+  ten minutes and backs off after failures. Weather failure does not prevent
+  the reports dashboard from loading. Rainfall is the sum of 24 complete hourly
+  rain-plus-showers values; incomplete data remains null.
+- `PATCH /reports/:id` accepts Resolved only after verification, records its own
+  event time and preserves the earlier verification/review times. Retrying the
+  same decision preserves timestamps. The website exposes this through the
+  existing report-details action area. Old incomplete events are not backfilled.
+- No new environment variables or dependencies are required. Keep your existing
+  Firebase credentials and API settings; restart the updated source processes.
+
+Sources: https://open-meteo.com/en/docs . Municipal boundary is copied from the
+existing project geometry (OpenStreetMap relation 17638449).
+
+Validation: 43 backend tests pass, including boundary checks, missing time/depth
+records, separate category scales, permission scoping, weather validation/cache
+behavior, failure isolation and resolution transitions. The paired website has
+53 passing tests; mobile has 59 service tests and 15 isolated Firestore emulator
+tests. A read-only live weather fetch succeeded. Firebase workflow tests used
+fixtures/emulation, not live reports.
+
+## Reports analytics update — 26 October 2026
+
+Use this backend together with the updated website ZIP and restart both
+processes. `GET /analytics/reports` now returns `analyticsVersion: 1`, a
+retrieval timestamp, selected period, authorization scope, report counts,
+rankings, hourly counts, timing coverage and a six-month submission trend.
+The existing `total`, `byStatus`, `byType` and `byBarangay` fields remain.
+
+The response also includes `presentation.version: 1` for the restored original
+website layout. The backend prepares its five metric tuples, barangay/road
+rankings, response-time bars, status gradient and legend, chart coordinates,
+notes and CSV rows from the same aggregate. The frontend only binds this data;
+its original on-screen stylesheet and panel structure are retained. Missing
+measurements are Not recorded. The existing Evacuation and Alert History rows
+stay unmeasured because these event durations are absent from reports.
+
+- With no month query, totals cover all saved reports. `?month=YYYY-MM` selects
+  reports submitted in that month using Asia/Manila boundaries. The trend ends
+  in the selected month, or the current Manila month for all-time results.
+- LGU administrators see municipality-wide reports. Barangay officials see
+  only records matching their assigned `barangayId`. All requests require a
+  Firebase ID token and an official role. Responses use `Cache-Control: no-store`.
+- Counts use the canonical `reports` collection, without duplicating linked
+  `roadConditions` records. Barangay labels come from `barangays`. Road rankings
+  group saved road names/locations and count submissions, including duplicates.
+- Status charts keep Verified, Resolved, Pending, Rejected and unknown statuses
+  separate. Approval rate includes Verified and Resolved. The selected month is
+  a submission cohort; its statuses and recorded durations reflect the latest
+  saved state, not historical snapshots of that month.
+- Durations use recorded submission/review/verification/resolution timestamps.
+  Missing, negative or future intervals are excluded and measured sample counts
+  are included. `updatedAt` is never substituted for a missing event timestamp.
+  Reports verified on submission can have a real zero-minute verification time.
+  Old records with overwritten review times and no distinct verification time
+  remain unmeasured. No historical timestamps or live data are rewritten.
+- Resolving through this API preserves earlier review/verification times. Retrying
+  the same decision preserves event times and avoids another audit entry. Returning
+  a report to Pending clears obsolete review and resolution metadata.
+
+Validation: `npm test` builds TypeScript and passes 43 tests, including analytics
+calculations, Manila date boundaries, authorization scope, missing data, failed
+reads, original-layout presentation values and report timestamp preservation. Fixtures replace Firebase in automated
+tests. This source update does not deploy or configure a live server.
+
+The updated website was also exercised in Chromium against these routes with
+an in-memory database, including a report decision appearing through the
+15-second refresh and matching CSV values.
+
 ## Local setup
 
 1. Run `npm ci`.

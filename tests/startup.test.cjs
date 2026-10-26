@@ -28,7 +28,7 @@ test('health reports HTTP availability without claiming a database connection', 
 });
 
 test('private API routes and Firestore diagnostic reject requests without authentication', async () => {
-  for (const route of ['/users', '/reports', '/alerts', '/profile', '/notifications', '/test-firestore']) {
+  for (const route of ['/users', '/reports', '/alerts', '/profile', '/notifications', '/test-firestore', '/dashboard/weather']) {
     const response = await fetch(`${base}${route}`);
     assert.equal(response.status, 401, route);
   }
