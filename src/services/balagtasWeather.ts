@@ -28,7 +28,7 @@ export function normalizeWeather(payload: any, now = Date.now()) {
   const [condition,icon]=descriptions[current.weather_code] || ['Condition unavailable','☁️'];
   return {status:'available' as 'available'|'stale',location:BALAGTAS_LOCATION,source:{name:'Open-Meteo',url:'https://open-meteo.com/',kind:'Weather model estimate'},
     observedAt:new Date(observed*1000).toISOString(),retrievedAt:new Date(now).toISOString(),temperatureC,humidity,windKmh,visibilityKm:visibilityM===null?null:Math.round(visibilityM/100)/10,
-    rain24hMm,condition,icon,grid:{latitude:payload.latitude??null,longitude:payload.longitude??null},
+    rain24hMm,condition,icon,weatherCode: numeric(current.weather_code,0,99),grid:{latitude:payload.latitude??null,longitude:payload.longitude??null},
     note:'Model estimates for the fixed Balagtas location; not a local weather-station measurement.',error:null as string|null};
 }
 

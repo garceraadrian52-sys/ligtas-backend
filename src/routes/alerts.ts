@@ -4,9 +4,11 @@ import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../midd
 import { logAction } from '../services/auditLog';
 
 import { validDocumentId } from '../services/inputValidation';
+import { automaticAlertsStatus } from '../services/automaticAlerts';
 const router = Router();
 router.param('id', (_req, res, next, id) => { if (!validDocumentId(id)) { res.status(400).json({ error: 'Invalid alert ID.' }); return; } next(); });
 router.use(requireAuth, requireOfficial);
+router.get('/automation', (_req, res) => res.json({ data: automaticAlertsStatus() }));
 
 const barangayNames: Record<string, string> = {
   barangay_borol_1st: 'Borol 1st',

@@ -2,6 +2,21 @@
 
 Express API and optional notification worker for the LigTAS Firebase project.
 
+## Report review roles
+
+LGU administrators can view reports across Balagtas and mark verified reports as Resolved after coordinating with the Barangay Official through any communication channel. An in-app field-update form or confirmation is not required. Only the assigned `BARANGAY_OFFICIAL` can approve or reject a report; only `LGU_ADMIN` can record final resolution. Resolution preserves the earlier review and verification timestamps, records `resolvedBy`, `resolvedByName` and `resolvedAt`, and updates linked road conditions. BOs cannot reopen a report already resolved by the LGU. The API and Firestore rules enforce these permissions; website report details expose Mark Resolved only on verified reports.
+
+## Automatic resident alerts
+
+Set `ENABLE_AUTOMATIC_ALERTS=true` and `ENABLE_NOTIFICATION_WORKERS=true` in the private backend `.env`, then restart `npm run dev` (or restart the deployed backend). The backend must stay running. The website's Alerts Management page shows the runtime status; it does not need to stay open for automation to run.
+
+- Reports: verified flood reports and closed/limited roads, with saved coordinates inside Balagtas, a known barangay and an observation/submission time within 24 hours. Messages use the saved location and water/road condition. Pending, rejected, resolved, historical and unlocated reports cannot trigger a broadcast. Resolving or withdrawing a report closes its linked alert. Unknown barangays never become a municipality-wide alert.
+- Weather: the existing fixed-location Open-Meteo API, checked every ten minutes. Only fresh available model codes 65, 67, 82, 95, 96 or 99 generate advisories. These mean heavy rain/freezing rain, violent showers, or thunderstorms under the [Open-Meteo WMO table](https://open-meteo.com/en/docs). Messages identify model estimates and never generate evacuation orders. Outages and stale data do not announce all-clear.
+- Deduplication: deterministic report alert IDs, transactional updates, and weather-code suppression while an advisory remains active. Audit records are committed with each alert change. Restarting notification delivery reconciles active automatic alerts using the existing deterministic delivery IDs.
+- Delivery: published alerts appear in the mobile alert feed. Phone pushes use the existing Expo delivery worker, registered device tokens, barangay targeting and notification preferences. Android Expo Go is feed-only; a development/production build and phone notification permission are required for background pushes. An enabled worker is not proof that a physical phone received a notification.
+
+`GET /alerts/automation` requires an authenticated official and reports worker configuration, report-listener readiness, last checks and runtime errors. Existing manual alert creation remains available for other situations. Keep Firebase service-account files and `.env` private. Do not run a second Firebase Functions delivery implementation against the same queue.
+
 ## Balagtas monitoring and resolution update — 26 October 2026
 
 - `GET /dashboard` now includes `waterTrend`, built from the same authorized

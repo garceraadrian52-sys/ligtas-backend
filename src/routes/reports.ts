@@ -46,6 +46,10 @@ router.get('/:id', async (req: AuthenticatedRequest, res) => {
 // PATCH /reports/:id — para sa verify/reject mula sa web dashboard
 router.patch('/:id', async (req: AuthenticatedRequest, res) => {
   const { status } = req.body ?? {};
+  const resolving = status === 'Resolved';
+  if (resolving ? req.user!.role !== 'LGU_ADMIN' : req.user!.role !== 'BARANGAY_OFFICIAL' || !req.user!.barangayId) {
+    return res.status(403).json({ error: resolving ? 'Only the LGU Admin can mark a report as Resolved.' : 'Only the assigned Barangay Official can approve or reject resident reports.' });
+  }
   if (!['Pending', 'Verified', 'Rejected', 'Resolved'].includes(status)) {
     return res.status(400).json({ error: 'status must be Pending, Verified, Rejected, or Resolved.' });
   }
@@ -59,7 +63,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
       if (!snapshot.exists) throw new Error('NOT_FOUND');
 
       const data = snapshot.data()!;
-      if (req.user!.role !== 'LGU_ADMIN' && data.barangayId !== req.user!.barangayId) {
+      if (!resolving && data.barangayId !== req.user!.barangayId) {
         throw new Error('FORBIDDEN');
       }
 
@@ -67,6 +71,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
       if (data.status === status && data.verification === status) { changed = false; return; }
       const knownStatus = ['pending','verified','approved','rejected','denied','resolved'].includes(String(data.status).toLowerCase()) ? data.status : data.verification;
       const currentStatus = String(knownStatus ?? '').toLowerCase();
+      if (!resolving && currentStatus === 'resolved') throw new Error('ALREADY_RESOLVED');
       if (status === 'Resolved' && !['verified','approved','resolved'].includes(currentStatus)) throw new Error('NOT_VERIFIED');
 
       const roadRef = data.roadConditionId ? db.doc(`roadConditions/${data.roadConditionId}`) : null;
@@ -95,11 +100,12 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
         updates.reviewedBy = null; updates.reviewedByName = null; updates.reviewedAt = null;
       }
       updates.resolvedAt = status === 'Resolved' ? (currentStatus === 'resolved' ? data.resolvedAt ?? null : new Date()) : null;
+      if (resolving) { updates.resolvedBy = req.user!.uid; updates.resolvedByName = req.user!.name; }
       transaction.update(reportRef, updates);
       changed = true;
 
       if (roadRef && roadSnap?.exists) {
-        transaction.update(roadRef, { verification: status, reportStatus: status, resolvedAt: updates.resolvedAt, updatedAt: new Date() });
+        transaction.update(roadRef, { verification: status, reportStatus: status, resolvedAt: updates.resolvedAt, ...(resolving ? { resolvedBy: req.user!.uid, resolvedByName: req.user!.name } : {}), updatedAt: new Date() });
       }
     });
 
@@ -121,6 +127,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
     if (error.message === 'NOT_FOUND') return res.status(404).json({ error: 'Report not found.' });
     if (error.message === 'FORBIDDEN') return res.status(403).json({ error: 'This report belongs to another barangay.' });
     if (error.message === 'NOT_VERIFIED') return res.status(409).json({ error: 'Verify the report before marking it resolved.' });
+    if (error.message === 'ALREADY_RESOLVED') return res.status(409).json({ error: 'A report resolved by the LGU Admin cannot be reopened by a Barangay Official.' });
     console.error('Update report failed:', error);
     res.status(500).json({ error: 'Failed to update report.' });
   }

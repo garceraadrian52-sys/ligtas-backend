@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { db } from './config/firebaseAdmin';
 import { startNotificationWorkers } from './services/notificationWorker';
+import { startAutomaticAlerts } from './services/automaticAlerts';
 import authRoutes from './routes/auth';
 import usersRoutes from './routes/users';
 import reportsRoutes from './routes/reports';
@@ -69,9 +70,10 @@ if (require.main === module) {
   app.listen(port, host, () => {
     console.log(`LigTAS backend running on http://${host}:${port}`);
     if (process.env.ENABLE_NOTIFICATION_WORKERS === 'true') {
-      startNotificationWorkers();
+      startNotificationWorkers(() => { if (process.env.ENABLE_AUTOMATIC_ALERTS === 'true') startAutomaticAlerts(); });
     } else {
       console.log('Notification workers disabled. HTTP health does not verify Firebase credentials.');
     }
+    if (process.env.ENABLE_AUTOMATIC_ALERTS === 'true' && process.env.ENABLE_NOTIFICATION_WORKERS !== 'true') startAutomaticAlerts();
   });
 }
