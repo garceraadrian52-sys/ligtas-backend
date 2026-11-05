@@ -1,5 +1,3 @@
-import { db } from '../config/firebaseAdmin';
-import { balagtasWeather } from './balagtasWeather';
 import { automaticReportAlert, automaticReportId, automaticWeatherAlert, isUsableAutomaticWeather } from './automaticAlertPolicy';
 
 export function createAutomaticAlertEngine(store: any, weather: { get(): Promise<any> }, clock = Date.now) {
@@ -43,43 +41,11 @@ export function createAutomaticAlertEngine(store: any, weather: { get(): Promise
   };
 }
 
-const runtime = { started: false, reportsReady: false, lastReportCheck: null as string | null, lastWeatherCheck: null as string | null, error: null as string | null };
 export function automaticAlertsStatus() {
-  return { ...runtime, enabled: process.env.ENABLE_AUTOMATIC_ALERTS === 'true', pushDeliveryEnabled: process.env.ENABLE_NOTIFICATION_WORKERS === 'true',
-    sources: ['Recent verified flood reports', 'Recent verified closed/limited roads', 'Severe weather model conditions'], weatherIntervalMinutes: 10 };
-}
-export function startAutomaticAlerts() {
-  if (runtime.started) return;
-  runtime.started = true;
-  const engine = createAutomaticAlertEngine(db, balagtasWeather);
-  const pending = new Set<string>();
-  let draining = false;
-  async function drain() {
-    if (draining) return;
-    draining = true;
-    try {
-      for (const id of pending) {
-        pending.delete(id);
-        try { await engine.syncReport(id); runtime.lastReportCheck = new Date().toISOString(); runtime.error = null; }
-        catch { pending.add(id); runtime.error = 'Report alert synchronization failed; retrying.'; break; }
-      }
-    } finally { draining = false; }
-  }
-  db.collection('reports').where('verification', '==', 'Verified').onSnapshot(snapshot => {
-    for (const change of snapshot.docChanges()) pending.add(change.doc.id);
-    runtime.reportsReady = true;
-    void drain();
-  }, () => { runtime.reportsReady = false; runtime.error = 'Report alert listener is unavailable.'; });
-  setInterval(() => void drain(), 60000).unref();
-  let checkingWeather = false;
-  async function weatherCheck() {
-    if (checkingWeather) return;
-    checkingWeather = true;
-    try { await engine.checkWeather(); runtime.lastWeatherCheck = new Date().toISOString(); }
-    catch { runtime.error = 'Weather alert synchronization failed; retrying.'; }
-    finally { checkingWeather = false; }
-  }
-  // Let the notification watcher initialize before the first automatic publications.
-  setTimeout(() => void weatherCheck(), 30000).unref();
-  setInterval(() => void weatherCheck(), 10 * 60000).unref();
+  return {
+    enabled: false,
+    mode: 'manual_lgu',
+    pushDeliveryEnabled: process.env.ENABLE_NOTIFICATION_WORKERS === 'true',
+    sources: ['Alerts manually created and published by an LGU Admin'],
+  };
 }

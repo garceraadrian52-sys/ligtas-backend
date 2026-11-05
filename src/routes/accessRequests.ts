@@ -79,6 +79,7 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
       actorId: req.user!.uid,
       actorName: req.user!.name,
       actorRole: req.user!.role,
+      actorEmail: req.user!.email,
       action: `access_request_${status.toLowerCase()}`,
       targetType: 'accessRequest',
       targetId: String(req.params.id),

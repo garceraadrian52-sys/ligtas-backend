@@ -37,15 +37,34 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
 
 // PATCH /profile/password
 router.patch('/password', async (req: AuthenticatedRequest, res) => {
-  const { newPassword } = req.body ?? {};
-  if (!newPassword || newPassword.length < 12) {
-    return res.status(400).json({ error: 'newPassword must be at least 12 characters.' });
+  const { currentPassword, newPassword } = req.body ?? {};
+  if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 12) {
+    return res.status(400).json({ error: 'Enter your current password and a new password with at least 12 characters.' });
   }
+  const webApiKey = process.env.FIREBASE_WEB_API_KEY;
+  if (!webApiKey) return res.status(503).json({ error: 'Password changes are temporarily unavailable.' });
 
   try {
+    const firebaseUser = await auth.getUser(req.user!.uid);
+    if (!firebaseUser.email) return res.status(400).json({ error: 'This account does not have an email password to update.' });
+    const verification = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${webApiKey}`,
+      {
+        method: 'POST',
+        signal: AbortSignal.timeout(15000),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: firebaseUser.email, password: currentPassword, returnSecureToken: false }),
+      },
+    );
+    if (!verification.ok) {
+      return res.status(400).json({ error: 'Your current password is incorrect.' });
+    }
     await auth.updateUser(req.user!.uid, { password: newPassword });
     res.json({ data: { updated: true } });
   } catch (error) {
+    if ((error as any)?.code === 'auth/weak-password') {
+      return res.status(400).json({ error: 'Choose a stronger password with at least 12 characters.' });
+    }
     console.error('Update password failed:', error);
     res.status(500).json({ error: 'Failed to update password.' });
   }

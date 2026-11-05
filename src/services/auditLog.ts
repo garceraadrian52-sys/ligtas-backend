@@ -4,6 +4,7 @@ export async function logAction(params: {
   actorId: string;
   actorName: string;
   actorRole: string;
+  actorEmail: string;
   action: string;
   targetType: string;
   targetId: string;

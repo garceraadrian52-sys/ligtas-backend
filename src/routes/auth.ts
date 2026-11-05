@@ -13,6 +13,42 @@ function friendlyAuthError(message: string) {
   return 'Login failed. Please try again.';
 }
 
+router.post('/forgot-password', async (req, res) => {
+  const email = req.body?.email;
+  if (typeof email !== 'string' || !email.trim() || email.length > 320 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+    return res.status(400).json({ error: 'Enter a valid email address.' });
+  }
+  if (!FIREBASE_WEB_API_KEY) {
+    return res.status(500).json({ error: 'Server is missing FIREBASE_WEB_API_KEY configuration.' });
+  }
+
+  try {
+    const response = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_WEB_API_KEY}`,
+      {
+        method: 'POST',
+        signal: AbortSignal.timeout(15000),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestType: 'PASSWORD_RESET', email: email.trim() }),
+      },
+    );
+    const result: any = await response.json();
+    const providerError = String(result?.error?.message ?? '');
+    // Do not disclose whether a particular address has a LigTAS account.
+    if (['EMAIL_NOT_FOUND', 'USER_DISABLED', 'INVALID_EMAIL', 'TOO_MANY_ATTEMPTS_TRY_LATER'].includes(providerError)) {
+      return res.status(202).json({ data: { accepted: true } });
+    }
+    if (!response.ok) {
+      console.error('Firebase password reset request failed:', providerError || response.status);
+      return res.status(503).json({ error: 'Password reset is temporarily unavailable. Please try again later.' });
+    }
+    return res.status(202).json({ data: { accepted: true } });
+  } catch (error) {
+    console.error('Password reset request failed:', error);
+    return res.status(503).json({ error: 'Password reset is temporarily unavailable. Please try again later.' });
+  }
+});
+
 router.post('/login', async (req, res) => {
   const { identifier, email: emailField, password } = req.body ?? {};
   const email = identifier ?? emailField;
@@ -49,9 +85,9 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Account profile not found.' });
     }
 
-        const role = String(profile.role ?? 'RESIDENT');
-    if (role !== 'LGU_ADMIN') {
-      return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can access the LigTAS web dashboard.' });
+    const role = String(profile.role ?? 'RESIDENT');
+    if (!['LGU_ADMIN', 'SUPER_ADMIN'].includes(role)) {
+      return res.status(403).json({ error: 'Only Super Admin or LGU/MDRRMO personnel can access the LigTAS web dashboard.' });
     }
 
         return res.json({
