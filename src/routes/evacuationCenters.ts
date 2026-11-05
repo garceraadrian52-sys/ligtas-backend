@@ -23,6 +23,37 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
   }
 });
 
+// GET /evacuation-centers/:id/occupants — live, checked-in household members.
+router.get('/:id/occupants', async (req: AuthenticatedRequest, res) => {
+  try {
+    const center = await db.doc(`evacuationCenters/${req.params.id}`).get();
+    if (!center.exists) return res.status(404).json({ error: 'Evacuation center not found.' });
+    const centerData = center.data()!;
+    if (req.user!.role !== 'LGU_ADMIN' && centerData.barangayId !== req.user!.barangayId) {
+      return res.status(403).json({ error: 'This center belongs to another barangay.' });
+    }
+    const records = await db.collection('evacuationRecords')
+      .where('evacuationCenterId', '==', req.params.id).get();
+    const households = records.docs.filter((record) => record.data().status !== 'checked_out').map((record) => {
+      const data = record.data();
+      const names: string[] = Array.isArray(data.memberNames) ? data.memberNames : [];
+      const relationships: string[] = Array.isArray(data.memberRelationships) ? data.memberRelationships : [];
+      return {
+        id: record.id,
+        household: data.householdName || data.householdId || 'Household',
+        members: (Array.isArray(data.memberIds) ? data.memberIds : []).map((id: string, index: number) => ({
+          name: names[index] || id,
+          relationship: relationships[index] || 'Household member',
+        })),
+      };
+    });
+    res.json({ data: households });
+  } catch (error) {
+    console.error('List evacuation occupants failed:', error);
+    res.status(500).json({ error: 'Failed to load current occupants.' });
+  }
+});
+
 // POST /evacuation-centers — LGU_ADMIN lang
 router.post('/', async (req: AuthenticatedRequest, res) => {
   if (req.user!.role !== 'LGU_ADMIN') {

@@ -29,6 +29,15 @@ async function queueForUser(uid: string, payload: any, revision: string, knownPr
       console.log(`Queued delivery ${id} for user ${uid}`);
     } catch (error: any) {
       if (error.code !== 6 && error.code !== 'already-exists') throw error;
+      const ref = deliveries.doc(id);
+      const existing = (await ref.get()).data();
+      // A previously superseded revision can become current again. Only retry
+      // jobs that never obtained a push ticket; accepted sends are not replayed.
+      if (existing?.state === 'superseded' && !existing.ticketId && existing.revision === payload.revision
+        && existing.expiresAt?.toMillis?.() > Date.now()) {
+        await ref.update({ state: 'pending', error: null, nextAttemptAt: now(), updatedAt: now() });
+        await processDelivery(ref);
+      }
       console.log(`Delivery ${id} already exists, skipping.`);
     }
   }
@@ -39,13 +48,16 @@ async function queueForUser(uid: string, payload: any, revision: string, knownPr
 const alertCache = new Map<string, any>();
 let alertsReady = false;
 
-function startAlertWatcher() {
+function startAlertWatcher(onReady?: () => void) {
   db.collection('alerts').onSnapshot(async (snapshot) => {
-    if (!alertsReady) {
+    const initial = !alertsReady;
+    if (initial) {
       snapshot.docs.forEach((doc) => alertCache.set(doc.id, doc.data()));
       alertsReady = true;
       console.log(`Alert watcher ready. Cached ${snapshot.size} existing alert(s).`);
-      return; // skip existing docs sa unang load, para walang notification spam pag-start
+      onReady?.();
+      // Recover automatic alerts after a crash between publication and queuing.
+      // Deterministic delivery IDs prevent sending the same revision twice.
     }
 
     console.log(`Alert watcher detected ${snapshot.docChanges().length} change(s).`);
@@ -53,6 +65,7 @@ function startAlertWatcher() {
     for (const change of snapshot.docChanges()) {
       if (change.type === 'removed') { alertCache.delete(change.doc.id); continue; }
       const alert = change.doc.data();
+      if (initial && alert.automatic !== true) continue;
       alertCache.set(change.doc.id, alert);
 
       console.log(`Alert change [${change.type}] id=${change.doc.id} status=${alert.status}`);
@@ -273,8 +286,8 @@ function startDeliveryWorker() {
   }, 24 * 60 * 60 * 1000);
 }
 
-export function startNotificationWorkers() {
-  startAlertWatcher();
+export function startNotificationWorkers(onAlertsReady?: () => void) {
+  startAlertWatcher(onAlertsReady);
   startReportWatcher();
   startHouseholdRequestWatcher();
   startDeliveryWorker();

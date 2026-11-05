@@ -23,7 +23,13 @@ import { notFound, errorHandler } from './middleware/errorHandler';
 
 export const app = express();
 app.disable('x-powered-by');
-app.use(cors());
+const allowedOrigins = (process.env.CORS_ORIGIN ?? '').split(',').map((origin) => origin.trim()).filter(Boolean);
+app.use(allowedOrigins.length
+  ? cors({ origin: (origin, callback) => {
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(new Error('Origin is not allowed by CORS.'));
+    } })
+  : cors());
 app.use(express.json());
 app.use('/auth', authRoutes);
 app.use('/users', usersRoutes);
@@ -65,7 +71,8 @@ app.use(errorHandler);
 
 if (require.main === module) {
   const port = Number(process.env.PORT || 4000);
-  const host = process.env.HOST || '127.0.0.1';
+  // Bind to all interfaces so managed hosts (and LAN devices) can reach the API.
+  const host = process.env.HOST || '0.0.0.0';
   app.listen(port, host, () => {
     console.log(`LigTAS backend running on http://${host}:${port}`);
     if (process.env.ENABLE_NOTIFICATION_WORKERS === 'true') {

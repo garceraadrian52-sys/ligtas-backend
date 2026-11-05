@@ -38,9 +38,13 @@ export function retryDelay(attempt: number) {
 }
 
 export function alertRevision(id: string, alert: any) {
+  // Firestore can return map fields in a different key order on a listener
+  // and a direct get. Object key order is not an alert content change.
+  const scope = alert.locationScope && typeof alert.locationScope === 'object'
+    ? Object.fromEntries(Object.keys(alert.locationScope).sort().map(key => [key, alert.locationScope[key]])) : null;
   const fields = [id, alert.title ?? null, alert.message ?? alert.description ?? null,
     alert.priority ?? null, alert.category ?? null, alert.alertType ?? null,
-    alert.coverageArea ?? null, alert.locationScope ?? null, alert.barangayIds ?? null,
+    alert.coverageArea ?? null, scope, alert.barangayIds ?? null,
     alert.barangayId ?? null, alert.publishedAt ?? null, alert.expiresAt ?? null];
   return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
 }
