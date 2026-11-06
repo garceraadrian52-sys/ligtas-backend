@@ -4,7 +4,9 @@ services:
     runtime: node
     plan: free
     branch: balagtas-monitoring
-    buildCommand: npm ci && npm run build
+    # Render may set NODE_ENV=production during install; TypeScript declarations
+    # are required at build time even though they are not runtime dependencies.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /health
     envVars:
