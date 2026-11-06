@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: ligtas-backend
+    runtime: node
+    plan: free
+    branch: balagtas-monitoring
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FIREBASE_PROJECT_ID
+        value: ligtas-d7a4c
+      - key: ENABLE_NOTIFICATION_WORKERS
+        value: "false"
+      - key: FIREBASE_WEB_API_KEY
+        sync: false
