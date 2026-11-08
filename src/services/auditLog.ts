@@ -1,4 +1,5 @@
 import { db } from '../config/firebaseAdmin';
+import { invalidateFirestoreReadCache } from './firestoreReadCache';
 
 export async function logAction(params: {
   actorId: string;
@@ -13,5 +14,5 @@ export async function logAction(params: {
   await db.collection('auditLogs').add({
     ...params,
     timestamp: new Date(),
-  }).catch((error) => console.error('Failed to write audit log:', error));
+  }).then(() => invalidateFirestoreReadCache('auditLogs:')).catch((error) => console.error('Failed to write audit log:', error));
 }

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 const router = Router();
 router.use(requireAuth);
@@ -17,6 +18,7 @@ router.get('/inbox', async (req: AuthenticatedRequest, res) => {
     res.json({data: {items: items.slice(0, 100), unreadCount: items.filter((item: any) => item.read !== true).length}});
   } catch (error) {
     console.error('Load inbox failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({error: 'Failed to load notifications.'});
   }
 });
@@ -34,6 +36,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
     res.json({ data: notifications });
   } catch (error) {
     console.error('List notifications failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load notifications.' });
   }
 });
@@ -64,6 +67,7 @@ router.get('/preview', async (req: AuthenticatedRequest, res) => {
     res.json({ data: preview });
   } catch (error) {
     console.error('Get notification preview failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load notification preview.' });
   }
 });
@@ -84,6 +88,7 @@ router.patch('/read-all', async (req: AuthenticatedRequest, res) => {
     res.json({data: {updated: unread.length}});
   } catch (error) {
     console.error('Mark all read failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to mark notifications as read.' });
   }
 });
@@ -103,6 +108,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
     res.json({ data: { id: updated.id, ...updated.data() } });
   } catch (error) {
     console.error('Update notification failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to update notification.' });
   }
 });

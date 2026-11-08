@@ -1,36 +1,32 @@
 import { Router } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
+import { Timestamp } from 'firebase-admin/firestore';
 
 const router = Router();
 router.use(requireAuth);
 
 // GET /profile
-router.get('/', async (req: AuthenticatedRequest, res) => {
-  try {
-    const snapshot = await db.doc(`users/${req.user!.uid}`).get();
-    if (!snapshot.exists) return res.status(404).json({ error: 'Profile not found.' });
-    res.json({ data: { id: snapshot.id, ...snapshot.data() } });
-  } catch (error) {
-    console.error('Get profile failed:', error);
-    res.status(500).json({ error: 'Failed to load profile.' });
-  }
+router.get('/', (req: AuthenticatedRequest, res) => {
+  const user = req.user!;
+  res.json({ data: { id: user.uid, ...req.profile! } });
 });
 
 // PATCH /profile
 router.patch('/', async (req: AuthenticatedRequest, res) => {
   try {
     const { name, phone, address } = req.body ?? {};
-    const updates: Record<string, any> = { updatedAt: new Date() };
+    const updates: Record<string, any> = { updatedAt: Timestamp.now() };
     if (name) { updates.name = name; updates.displayName = name; }
     if (phone !== undefined) updates.phone = phone;
     if (address !== undefined) updates.address = address;
 
     await db.doc(`users/${req.user!.uid}`).update(updates);
-    const updated = await db.doc(`users/${req.user!.uid}`).get();
-    res.json({ data: { id: updated.id, ...updated.data() } });
+    res.json({ data: { id: req.user!.uid, ...req.profile!, ...updates } });
   } catch (error) {
     console.error('Update profile failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to update profile.' });
   }
 });
@@ -66,6 +62,7 @@ router.patch('/password', async (req: AuthenticatedRequest, res) => {
       return res.status(400).json({ error: 'Choose a stronger password with at least 12 characters.' });
     }
     console.error('Update password failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to update password.' });
   }
 });

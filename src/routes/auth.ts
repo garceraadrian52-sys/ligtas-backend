@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 const router = Router();
 const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY;
@@ -45,6 +46,7 @@ router.post('/forgot-password', async (req, res) => {
     return res.status(202).json({ data: { accepted: true } });
   } catch (error) {
     console.error('Password reset request failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     return res.status(503).json({ error: 'Password reset is temporarily unavailable. Please try again later.' });
   }
 });
@@ -104,6 +106,7 @@ router.post('/login', async (req, res) => {
     });
   } catch (error) {
     console.error('Login failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     return res.status(503).json({ error: 'Sign-in is temporarily unavailable. Please try again.' });
   }
 });

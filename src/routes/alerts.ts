@@ -5,6 +5,7 @@ import { logAction } from '../services/auditLog';
 
 import { validDocumentId } from '../services/inputValidation';
 import { automaticAlertsStatus } from '../services/automaticAlerts';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 const router = Router();
 router.param('id', (_req, res, next, id) => { if (!validDocumentId(id)) { res.status(400).json({ error: 'Invalid alert ID.' }); return; } next(); });
 router.use(requireAuth, requireOfficial);
@@ -59,6 +60,7 @@ router.get('/', async (_req: AuthenticatedRequest, res) => {
     res.json({ data: alerts });
   } catch (error) {
     console.error('List alerts failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load alerts.' });
   }
 });
@@ -127,6 +129,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     res.status(201).json({ data: { id: created.id, ...createdData } });
   } catch (error) {
     console.error('Create alert failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to create alert.' });
   }
 });
@@ -171,6 +174,7 @@ router.patch('/:id/publish', async (req: AuthenticatedRequest, res) => {
     if (error.message === 'NOT_FOUND') return res.status(404).json({ error: 'Alert not found.' });
     if (error.message === 'INVALID_STATE') return res.status(409).json({ error: 'Only draft alerts can be published.' });
     console.error('Publish alert failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to publish alert.' });
   }
 });

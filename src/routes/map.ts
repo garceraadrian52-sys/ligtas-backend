@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
+import { listReports } from '../services/reportReads';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 const router = Router();
 router.use(requireAuth, requireOfficial);
@@ -19,17 +21,13 @@ router.get('/monitoring', async (req: AuthenticatedRequest, res) => {
     const centersQuery = isLguAdmin ? centersRef : centersRef.where('barangayId', '==', barangayId);
     const centersSnapshot = await centersQuery.get();
 
-    const reportsRef = db.collection('reports');
-    const reportsQuery = isLguAdmin ? reportsRef : reportsRef.where('barangayId', '==', barangayId);
-    const reportsSnapshot = await reportsQuery.get();
-    const floodReports = reportsSnapshot.docs.filter(doc => {
-      const report = doc.data();
+    const reports = await listReports(isLguAdmin ? null : barangayId);
+    const floodReports = reports.filter(report => {
       return report.type === 'flood' || report.reportType === 'flood';
-    }).map(doc => {
-      const data = doc.data();
-      return { id: doc.id, location: data.location, description: data.description,
-        status: data.status, verification: data.verification, latitude: data.latitude,
-        longitude: data.longitude, locationPoint: data.locationPoint, coordinates: data.coordinates };
+    }).map(report => {
+      return { id: report.id, location: report.location, description: report.description,
+        status: report.status, verification: report.verification, latitude: report.latitude,
+        longitude: report.longitude, locationPoint: report.locationPoint, coordinates: report.coordinates };
     });
     res.json({
       data: {
@@ -40,6 +38,7 @@ router.get('/monitoring', async (req: AuthenticatedRequest, res) => {
     });
   } catch (error) {
     console.error('Map monitoring load failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load map monitoring data.' });
   }
 });

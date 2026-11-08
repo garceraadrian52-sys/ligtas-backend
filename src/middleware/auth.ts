@@ -1,8 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
+import { isFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 export interface AuthenticatedRequest extends Request {
   user?: { uid: string; role: string; barangayId: string | null; name: string; email: string };
+  profile?: Record<string, any>;
 }
 
 export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
@@ -26,10 +28,12 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       name: profile.name ?? profile.displayName ?? '',
       email: profile.email ?? decoded.email ?? '',
     };
+    req.profile = profile;
     next();
   } catch (error: any) {
     const invalidTokenCodes = ['auth/argument-error', 'auth/invalid-id-token', 'auth/id-token-expired', 'auth/id-token-revoked', 'auth/user-disabled', 'auth/user-not-found'];
     if (invalidTokenCodes.includes(error?.code)) return res.status(401).json({ error: 'Invalid or expired token.' });
+    if (isFirestoreResourceExhausted(error)) res.set('Retry-After', '5');
     console.error('Authentication dependency unavailable:', error?.code ?? 'unknown');
     return res.status(503).json({ error: 'Sign-in verification is temporarily unavailable. Please try again.' });
   }
