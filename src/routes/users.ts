@@ -3,6 +3,7 @@ import { auth, db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { validText, validDocumentId } from '../services/inputValidation';
 import { logAction } from '../services/auditLog';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 const router = Router();
 const accountRoles = ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'] as const;
@@ -44,6 +45,7 @@ router.get('/access', async (req: AuthenticatedRequest, res) => {
     } });
   } catch (error) {
     console.error('Load user access failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load account permissions.' });
   }
 });
@@ -59,6 +61,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
     res.json({ data: users });
   } catch (error) {
     console.error('List users failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load users.' });
   }
 });
@@ -120,6 +123,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     console.error('Create user failed:', error);
     if (error.code === 'auth/email-already-exists') return res.status(409).json({ error: 'This email is already registered.' });
     if (error.code === 'super-admin-exists') return res.status(409).json({ error: error.message });
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to create account.' });
   }
 });
@@ -162,6 +166,7 @@ router.patch('/:userId', async (req: AuthenticatedRequest, res) => {
     res.json({ data: { id: updated.id, ...updated.data() } });
   } catch (error) {
     console.error('Update user failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to update user.' });
   }
 });
@@ -184,6 +189,7 @@ router.delete('/:userId', async (req: AuthenticatedRequest, res) => {
     res.json({ data: { deleted: true } });
   } catch (error) {
     console.error('Delete user failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to delete user.' });
   }
 });

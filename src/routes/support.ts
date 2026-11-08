@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 
 const router = Router();
@@ -17,6 +18,7 @@ router.get('/support', requireAuth, requireOfficial, async (_req: AuthenticatedR
     res.json({ data: { hotlines } });
   } catch (error) {
     console.error('Get support contacts failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load support contacts.' });
   }
 });
@@ -28,6 +30,7 @@ router.get('/emergency-mode', requireAuth, requireOfficial, async (_req: Authent
     res.json({ data });
   } catch (error) {
     console.error('Get emergency mode failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load emergency mode status.' });
   }
 });
@@ -47,6 +50,7 @@ router.patch('/emergency-mode', requireAuth, requireOfficial, async (req: Authen
     res.json({ data: updated.data() });
   } catch (error) {
     console.error('Update emergency mode failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to update emergency mode.' });
   }
 });

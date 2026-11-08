@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 const router = Router();
 router.use(requireAuth);
@@ -25,6 +26,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
     } });
   } catch (error) {
     console.error('Load settings failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load settings.' });
   }
 });
@@ -75,6 +77,7 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
     } });
   } catch (error) {
     console.error('Save settings failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to save settings.' });
   }
 });

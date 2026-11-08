@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
+import { cachedFirestoreRead } from '../services/firestoreReadCache';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 const router = Router();
 router.use(requireAuth, requireOfficial);
@@ -12,11 +14,14 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
   }
 
   try {
-    const snapshot = await db.collection('auditLogs').orderBy('timestamp', 'desc').limit(200).get();
-    const logs = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    const logs = await cachedFirestoreRead('auditLogs:latest-200', async () => {
+      const snapshot = await db.collection('auditLogs').orderBy('timestamp', 'desc').limit(200).get();
+      return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    });
     res.json({ data: logs });
   } catch (error) {
     console.error('List audit logs failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load audit logs.' });
   }
 });
