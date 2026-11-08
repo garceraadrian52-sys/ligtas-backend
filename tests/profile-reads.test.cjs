@@ -5,6 +5,7 @@ const express = require('express');
 let profile = { role: 'RESIDENT', name: 'Resident', phone: '555-0100', address: 'Wawa' };
 let documentReads = 0;
 let documentWrites = 0;
+const authUpdates = [];
 const db = {
   doc(path) {
     assert.equal(path, 'users/resident-1');
@@ -22,7 +23,10 @@ const db = {
 };
 
 require.cache[require.resolve('../dist/config/firebaseAdmin')] = {
-  exports: { db, auth: { verifyIdToken: async () => ({ uid: 'resident-1', email: 'resident@example.com' }) } },
+  exports: { db, auth: {
+    verifyIdToken: async () => ({ uid: 'resident-1', email: 'resident@example.com' }),
+    updateUser: async (uid, updates) => { authUpdates.push({ uid, updates }); },
+  } },
 };
 
 const app = express();
@@ -77,4 +81,53 @@ test('profile PATCH returns the updated snapshot without a follow-up read', asyn
   assert.equal(data.phone, '555-0200');
   assert.equal(typeof data.updatedAt._seconds, 'number');
   assert.equal(typeof data.updatedAt._nanoseconds, 'number');
+});
+
+test('profile PATCH persists email, phone, barangay, and a bounded inline profile image', async () => {
+  documentReads = 0;
+  documentWrites = 0;
+  authUpdates.length = 0;
+  const response = await request('', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: '  new@example.com ', phone: '555-0300', barangayId: null, photoURL: 'data:image/jpeg;base64,YWJj' }),
+  });
+  const { data } = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(documentReads, 1);
+  assert.equal(documentWrites, 1);
+  assert.equal(data.email, 'new@example.com');
+  assert.equal(data.phone, '555-0300');
+  assert.equal(data.photoURL, 'data:image/jpeg;base64,YWJj');
+  assert.deepEqual(authUpdates, [{ uid: 'resident-1', updates: { email: 'new@example.com' } }]);
+});
+
+test('Barangay Officials cannot change their own barangay assignment', async () => {
+  profile = { role: 'BARANGAY_OFFICIAL', barangayId: 'barangay_wawa', name: 'Official', phone: '555-0100' };
+  documentReads = 0;
+  documentWrites = 0;
+  authUpdates.length = 0;
+  const response = await request('', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ barangayId: 'barangay_dalig' }),
+  });
+
+  assert.equal(response.status, 403);
+  assert.equal(documentReads, 1);
+  assert.equal(documentWrites, 0);
+  assert.deepEqual(authUpdates, []);
+  profile = { role: 'RESIDENT', name: 'Resident', phone: '555-0100', address: 'Wawa' };
+});
+
+test('profile PATCH rejects malformed profile images before writing', async () => {
+  documentWrites = 0;
+  const response = await request('', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ photoURL: 'data:text/html;base64,YWJj' }),
+  });
+  assert.equal(response.status, 400);
+  assert.equal(documentWrites, 0);
 });
