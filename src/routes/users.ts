@@ -5,6 +5,7 @@ import { validText, validDocumentId } from '../services/inputValidation';
 import { logAction } from '../services/auditLog';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { firebaseAuthPhotoUrl, isValidEmail, isValidProfilePhoto } from '../services/profileFields';
+import { allocateDisplayId } from '../services/recordDisplayIds';
 
 const router = Router();
 const accountRoles = ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'] as const;
@@ -107,16 +108,23 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       updatedAt: new Date(),
     };
 
+    let displayId: string;
     try {
       if (isBootstrap) {
-        await db.runTransaction(async transaction => {
+        displayId = await db.runTransaction(async transaction => {
           const lock = await transaction.get(bootstrapRef);
           if (lock.exists) throw Object.assign(new Error('A Super Admin account has already been bootstrapped.'), { code: 'super-admin-exists' });
+          const displayId = await allocateDisplayId(transaction, db, 'users');
           transaction.create(bootstrapRef, { userId: userRecord.uid, createdAt: new Date() });
-          transaction.create(db.doc(`users/${userRecord.uid}`), profile);
+          transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, displayId });
+          return displayId;
         });
       } else {
-        await db.doc(`users/${userRecord.uid}`).set(profile);
+        displayId = await db.runTransaction(async transaction => {
+          const displayId = await allocateDisplayId(transaction, db, 'users');
+          transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, displayId });
+          return displayId;
+        });
       }
     } catch (error) {
       await auth.deleteUser(userRecord.uid).catch(() => {});
@@ -124,7 +132,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     }
 
     await writeAudit(req, 'user_created', userRecord.uid, { email: profile.email, role, barangayId: profile.barangayId });
-    res.status(201).json({ data: { id: userRecord.uid, ...profile } });
+    res.status(201).json({ data: { id: userRecord.uid, ...profile, displayId } });
   } catch (error: any) {
     console.error('Create user failed:', error);
     if (error.code === 'auth/email-already-exists') return res.status(409).json({ error: 'This email is already registered.' });

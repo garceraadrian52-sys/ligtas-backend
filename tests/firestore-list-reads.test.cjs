@@ -7,6 +7,7 @@ let reportFailure = false;
 let auditFailure = false;
 let reportId = 1;
 let auditId = 1;
+let reportDisplayId = 0;
 let reads = { reports: 0, auditLogs: 0 };
 const records = {
   reports: [{ id: 'report-1', data: { type: 'flood', status: 'Verified', barangayId: 'wawa' } }],
@@ -34,10 +35,36 @@ const db = {
         records[name].push({ id, data });
         return { id, async get() { return { id, data: () => data }; } };
       },
+      doc() {
+        const id = `report-${++reportId}`;
+        return { id, path: `${name}/${id}` };
+      },
     };
     return query;
   },
-  doc() { throw new Error('Unexpected document read'); },
+  doc(path) {
+    if (path === 'recordIdCounters/reports') return { id: 'reports', path };
+    throw new Error('Unexpected document read');
+  },
+  async runTransaction(callback) {
+    const writes = [];
+    const transaction = {
+      async get(reference) {
+        if (reference.path === 'recordIdCounters/reports') {
+          return { exists: reportDisplayId > 0, data: () => ({ lastIssued: reportDisplayId }) };
+        }
+        return { exists: false, data: () => undefined };
+      },
+      set(reference, data) { writes.push(['counter', reference, data]); },
+      create(reference, data) { writes.push(['report', reference, data]); },
+    };
+    const result = await callback(transaction);
+    for (const [kind, reference, data] of writes) {
+      if (kind === 'counter') reportDisplayId = data.lastIssued;
+      else records.reports.push({ id: reference.id, data });
+    }
+    return result;
+  },
 };
 
 require.cache[require.resolve('../dist/config/firebaseAdmin')] = { exports: { db } };

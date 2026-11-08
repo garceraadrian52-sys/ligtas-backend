@@ -15,6 +15,7 @@ services:
       - key: FIREBASE_PROJECT_ID
         value: ligtas-d7a4c
       - key: ENABLE_NOTIFICATION_WORKERS
-        value: "false"
+        # Firestore event listeners handle new alerts immediately; a bounded five-minute sweep only retries/receipts due deliveries.
+        value: "true"
       - key: FIREBASE_WEB_API_KEY
         sync: false

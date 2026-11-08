@@ -3,6 +3,7 @@ import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { logAction } from '../services/auditLog';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
+import { allocateDisplayId } from '../services/recordDisplayIds';
 
 const router = Router();
 
@@ -16,7 +17,7 @@ router.post('/', async (req, res) => {
 
   try {
     const now = new Date();
-    const docRef = await db.collection('accessRequests').add({
+    const requestData = {
       fullName: String(fullName).trim(),
       email: String(email).trim().toLowerCase(),
       phone: String(phone).trim(),
@@ -27,9 +28,15 @@ router.post('/', async (req, res) => {
       status: 'Pending',
       createdAt: now,
       updatedAt: now,
+    };
+    const docRef = db.collection('accessRequests').doc();
+    const displayId = await db.runTransaction(async (transaction) => {
+      const displayId = await allocateDisplayId(transaction, db, 'accessRequests');
+      transaction.create(docRef, { ...requestData, displayId });
+      return displayId;
     });
 
-    res.status(201).json({ data: { id: docRef.id, status: 'Pending' } });
+    res.status(201).json({ data: { id: docRef.id, displayId, status: 'Pending' } });
   } catch (error) {
     console.error('Create access request failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;

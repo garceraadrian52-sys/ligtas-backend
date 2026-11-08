@@ -6,6 +6,7 @@ import { logAction } from '../services/auditLog';
 import { validDocumentId } from '../services/inputValidation';
 import { automaticAlertsStatus } from '../services/automaticAlerts';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
+import { allocateDisplayId } from '../services/recordDisplayIds';
 const router = Router();
 router.param('id', (_req, res, next, id) => { if (!validDocumentId(id)) { res.status(400).json({ error: 'Invalid alert ID.' }); return; } next(); });
 router.use(requireAuth, requireOfficial);
@@ -89,7 +90,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       : ['All barangays in Balagtas'];
 
     const now = new Date();
-    const docRef = await db.collection('alerts').add({
+    const alertData = {
       alertType: category,
       category,
       priority,
@@ -110,10 +111,14 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       publishedAt: publish ? now : null,
       createdAt: now,
       updatedAt: now,
+    };
+    const docRef = db.collection('alerts').doc();
+    const displayId = await db.runTransaction(async (transaction) => {
+      const displayId = await allocateDisplayId(transaction, db, 'alerts');
+      transaction.create(docRef, { ...alertData, displayId });
+      return displayId;
     });
-
-        const created = await docRef.get();
-    const createdData = created.data()!;
+    const createdData = { ...alertData, displayId };
 
     await logAction({
       actorId: req.user!.uid,
@@ -122,11 +127,11 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       actorEmail: req.user!.email,
       action: publish ? 'alert_created_and_published' : 'alert_created_draft',
       targetType: 'alert',
-      targetId: created.id,
+      targetId: docRef.id,
       details: { title: createdData.title, category: createdData.category },
     });
 
-    res.status(201).json({ data: { id: created.id, ...createdData } });
+    res.status(201).json({ data: { id: docRef.id, ...createdData } });
   } catch (error) {
     console.error('Create alert failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;

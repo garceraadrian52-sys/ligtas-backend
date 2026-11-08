@@ -1,6 +1,6 @@
 const assert=require('node:assert/strict');const {test,before,after}=require('node:test');const express=require('express');
-let alert,writeCount=0,audits=0,createdReport;
-const db={doc(path){return {id:path.split('/').pop(),path,async get(){return {exists:true,data:()=>({})}}}},collection(){return {async add(data){createdReport=data;return {id:'report',async get(){return {id:'report',data:()=>data}}}}}},async runTransaction(callback){return callback({async get(){return {exists:!!alert,data:()=>alert}},update(_ref,updates){writeCount++;alert={...alert,...updates}}})}};
+let alert,writeCount=0,audits=0,createdReport,displayCounter=0;
+const db={doc(path){return {id:path.split('/').pop(),path,async get(){return {exists:true,data:()=>({})}}}},collection(name){return {doc(){const id='new-report';return {id,path:`${name}/${id}`}},async add(data){createdReport=data;return {id:'report',async get(){return {id:'report',data:()=>data}}}}}},async runTransaction(callback){const writes=[];const transaction={async get(ref){if(ref.path==='recordIdCounters/reports')return {exists:displayCounter>0,data:()=>({lastIssued:displayCounter})};return {exists:!!alert,data:()=>alert}},set(ref,data){writes.push(['set',ref,data])},create(ref,data){writes.push(['create',ref,data])},update(ref,updates){writes.push(['update',ref,updates])}};const result=await callback(transaction);for(const [kind,ref,data] of writes){if(ref.path==='recordIdCounters/reports')displayCounter=data.lastIssued;if(kind==='create'&&ref.path.startsWith('reports/'))createdReport=data;if(kind==='update'){writeCount++;alert={...alert,...data}}}return result}};
 require.cache[require.resolve('../dist/config/firebaseAdmin')]={exports:{db}};
 require.cache[require.resolve('../dist/middleware/auth')]={exports:{requireAuth(req,res,next){req.user={role:'LGU_ADMIN',uid:'tester',name:'Tester'};next()},requireOfficial(req,res,next){next()}}};
 require.cache[require.resolve('../dist/services/auditLog')]={exports:{async logAction(){audits++}}};
@@ -12,7 +12,7 @@ test('resolved/closed alerts cannot be reactivated through publish',async()=>{fo
 test('report inputs reject malformed fields and retain valid map coordinates',async()=>{
  const request=body=>fetch(base+'/reports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'flood',location:'Wawa',description:'Water on road',...body})});
  for(const body of [{location:' '},{description:{}},{latitude:14.8},{latitude:true,longitude:120},{barangayId:'a/b'},{waterLevel:{}}]){createdReport=null;assert.equal((await request(body)).status,400);assert.equal(createdReport,null)}
- assert.equal((await request({latitude:14.8,longitude:120.9})).status,201);assert.equal(createdReport.latitude,14.8);assert.equal(createdReport.longitude,120.9);
+ assert.equal((await request({latitude:14.8,longitude:120.9})).status,201);assert.equal(createdReport.latitude,14.8);assert.equal(createdReport.longitude,120.9);assert.equal(createdReport.displayId,'RPT0001');
 });
 
 test('account creation rejects malformed names/passwords and unassigned officials',async()=>{

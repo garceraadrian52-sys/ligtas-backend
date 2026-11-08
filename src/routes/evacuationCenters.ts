@@ -4,6 +4,7 @@ import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../midd
 
 import { validText } from '../services/inputValidation';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
+import { allocateDisplayId } from '../services/recordDisplayIds';
 const router = Router();
 router.use(requireAuth, requireOfficial);
 
@@ -78,7 +79,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   try {
     if (!(await db.doc('barangays/' + barangayId).get()).exists) return res.status(400).json({error: 'Barangay does not exist.'});
     const now = new Date();
-    const docRef = await db.collection('evacuationCenters').add({
+    const centerData = {
       name: String(name).trim(),
       barangayId,
       address: address ?? null,
@@ -95,10 +96,14 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       createdBy: req.user!.uid,
       createdAt: now,
       updatedAt: now,
+    };
+    const docRef = db.collection('evacuationCenters').doc();
+    const displayId = await db.runTransaction(async (transaction) => {
+      const displayId = await allocateDisplayId(transaction, db, 'evacuationCenters');
+      transaction.create(docRef, { ...centerData, displayId });
+      return displayId;
     });
-
-    const created = await docRef.get();
-    res.status(201).json({ data: { id: created.id, ...created.data() } });
+    res.status(201).json({ data: { id: docRef.id, ...centerData, displayId } });
   } catch (error) {
     console.error('Create evacuation center failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;

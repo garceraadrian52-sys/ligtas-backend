@@ -2,11 +2,26 @@ import { createHash } from 'node:crypto';
 import { Timestamp, FieldValue, type DocumentReference } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
 import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision } from './notificationPolicy';
+import { assignDisplayIdIfMissing } from './recordDisplayIds';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const now = () => Timestamp.now();
 const later = (ms: number) => Timestamp.fromMillis(Date.now() + ms);
 const deliveries = db.collection('notificationDeliveries');
+const ALERT_RECOVERY_WINDOW_MS = 60 * 60 * 1000;
+
+function timestampMillis(value: any) {
+  if (typeof value?.toMillis === 'function') return value.toMillis();
+  const parsed = value instanceof Date ? value.getTime() : typeof value === 'string' ? Date.parse(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function recentlyPublished(alert: any) {
+  const time = timestampMillis(alert.publishedAt ?? alert.createdAt);
+  if (time === null) return false;
+  const age = Date.now() - time;
+  return age >= -5 * 60 * 1000 && age <= ALERT_RECOVERY_WINDOW_MS;
+}
 
 // Tumatanggap ng pre-fetched na profile (opsyonal) para maiwasan ang duplicate read
 async function queueForUser(uid: string, payload: any, revision: string, knownProfile?: any) {
@@ -65,7 +80,13 @@ function startAlertWatcher(onReady?: () => void) {
     for (const change of snapshot.docChanges()) {
       if (change.type === 'removed') { alertCache.delete(change.doc.id); continue; }
       const alert = change.doc.data();
-      if (initial && alert.automatic !== true) continue;
+      if (!initial && change.type === 'added' && !(typeof alert.displayId === 'string' && alert.displayId)) {
+        await assignDisplayIdIfMissing(db, 'alerts', change.doc.ref).catch((error) => console.error('Assign alert display ID failed:', error));
+      }
+      // Recover recent manual publications if the long-running Render service
+      // started or woke after the alert was saved. Stable delivery IDs avoid
+      // replaying a revision that already obtained a push ticket.
+      if (initial && alert.automatic !== true && !(published(alert) && recentlyPublished(alert))) continue;
       alertCache.set(change.doc.id, alert);
 
       console.log(`Alert change [${change.type}] id=${change.doc.id} status=${alert.status}`);
@@ -123,6 +144,10 @@ function startReportWatcher() {
       const before = reportCache.get(change.doc.id);
       const report = change.doc.data();
       reportCache.set(change.doc.id, report);
+
+      if (reportsReady && change.type === 'added' && !(typeof report.displayId === 'string' && report.displayId)) {
+        await assignDisplayIdIfMissing(db, 'reports', change.doc.ref).catch((error) => console.error('Assign report display ID failed:', error));
+      }
 
       const status = String(report?.verification ?? report?.status ?? '').toLowerCase();
       const beforeStatus = String(before?.verification ?? before?.status ?? '').toLowerCase();
@@ -286,7 +311,10 @@ function startDeliveryWorker() {
   }, 24 * 60 * 60 * 1000);
 }
 
+let notificationWorkersStarted = false;
 export function startNotificationWorkers(onAlertsReady?: () => void) {
+  if (notificationWorkersStarted) return;
+  notificationWorkersStarted = true;
   startAlertWatcher(onAlertsReady);
   startReportWatcher();
   startHouseholdRequestWatcher();

@@ -6,6 +6,7 @@ import { invalidateReportReads, listReports } from '../services/reportReads';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 import { validText, validDocumentId, validCoordinatePair } from '../services/inputValidation';
+import { allocateDisplayId } from '../services/recordDisplayIds';
 const router = Router();
 router.param('id', (_req, res, next, id) => { if (!validDocumentId(id)) { res.status(400).json({ error: 'Invalid report ID.' }); return; } next(); });
 router.use(requireAuth, requireOfficial);
@@ -185,7 +186,12 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       baseData.cause = cause ?? 'Not specified';
     }
 
-    const docRef = await db.collection('reports').add(baseData);
+    const docRef = db.collection('reports').doc();
+    const displayId = await db.runTransaction(async (transaction) => {
+      const displayId = await allocateDisplayId(transaction, db, 'reports');
+      transaction.create(docRef, { ...baseData, displayId });
+      return displayId;
+    });
     invalidateReportReads();
 
     await logAction({
@@ -199,8 +205,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       details: { type, location },
     });
 
-    const created = await docRef.get();
-    res.status(201).json({ data: { id: created.id, ...created.data() } });
+    res.status(201).json({ data: { id: docRef.id, ...baseData, displayId } });
   } catch (error) {
     console.error('Submit report failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;

@@ -1,5 +1,6 @@
 import { automaticReportAlert, automaticReportId, automaticWeatherAlert, isUsableAutomaticWeather } from './automaticAlertPolicy';
 import { invalidateFirestoreReadCache } from './firestoreReadCache';
+import { allocateDisplayId } from './recordDisplayIds';
 
 export function createAutomaticAlertEngine(store: any, weather: { get(): Promise<any> }, clock = Date.now) {
   async function write(transaction: any, ref: any, previous: any, candidate: any, now: number) {
@@ -11,7 +12,8 @@ export function createAutomaticAlertEngine(store: any, weather: { get(): Promise
         // Metadata-only edits and subsequent model estimates must not repeat pushes.
         if (previous.message === candidate.message || (candidate.automationSource === 'weather-api' && previous.weatherCode === candidate.weatherCode)) return false;
       }
-      transaction.set(ref, { ...candidate, status: 'active', createdBy: 'ligtas-automation', createdByName: 'LigTAS Automatic Alerts',
+      const displayId = previous ? previous.displayId : await allocateDisplayId(transaction, store, 'alerts');
+      transaction.set(ref, { ...candidate, ...(displayId ? { displayId } : {}), status: 'active', createdBy: 'ligtas-automation', createdByName: 'LigTAS Automatic Alerts',
         createdByRole: 'SYSTEM', createdAt: previous?.createdAt || new Date(now), publishedAt: new Date(now), updatedAt: new Date(now) });
     }
     const audit = store.collection('auditLogs').doc();
