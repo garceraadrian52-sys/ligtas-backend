@@ -41,7 +41,7 @@ export function validAnalyticsMonth(value: unknown): value is string {
   return typeof value === 'string' && /^(19|20|21)\d{2}-(0[1-9]|1[0-2])$/.test(value);
 }
 
-function reportStatus(report: Report): Status {
+export function reportStatus(report: Report): Status {
   const normalize = (value: unknown): Status | null => {
     const raw = text(value).toLowerCase();
     if (raw === 'approved') return 'Verified';
@@ -52,7 +52,7 @@ function reportStatus(report: Report): Status {
   return normalize(report.status) ?? normalize(report.verification) ?? 'Other';
 }
 
-function reportType(report: Report): 'flood' | 'road' | 'other' {
+export function reportType(report: Report): 'flood' | 'road' | 'other' {
   const raw = text(report.type || report.reportType).toLowerCase();
   if (raw.includes('road')) return 'road';
   if (raw.includes('flood')) return 'flood';

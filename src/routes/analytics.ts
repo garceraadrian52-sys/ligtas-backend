@@ -3,6 +3,7 @@ import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { summarizeReportAnalytics, validAnalyticsMonth } from '../services/reportAnalytics';
 import { presentReportAnalytics } from '../services/reportAnalyticsPresentation';
+import { buildAnalyticsOverview } from '../services/analyticsOverview';
 
 const router = Router();
 router.use(requireAuth, requireOfficial);
@@ -25,9 +26,19 @@ router.get('/reports', async (req: AuthenticatedRequest, res) => {
     const scope = { barangayId: req.user!.role === 'LGU_ADMIN' ? null : req.user!.barangayId,
       label: req.user!.role === 'LGU_ADMIN' ? 'Balagtas, Bulacan' : (barangays.find(item => item.id === req.user!.barangayId)?.name || req.user!.barangayId || 'Assigned barangay') };
 
+    const scopedRead = (collection: string) => {
+      const ref = db.collection(collection);
+      return (req.user!.role === 'LGU_ADMIN' ? ref : ref.where('barangayId', '==', req.user!.barangayId)).get();
+    };
+    // Evacuation failures must not hide otherwise available flood analytics.
+    const [centersResult, activeResult] = await Promise.allSettled([scopedRead('evacuationCenters'), scopedRead('activeEvacuations')]);
+    const centers = centersResult.status === 'fulfilled' ? centersResult.value.docs.map(doc=>({...doc.data(),id:doc.id})) : null;
+    const active = activeResult.status === 'fulfilled' ? activeResult.value.docs.map(doc=>({...doc.data(),id:doc.id})) : null;
+    const overview = buildAnalyticsOverview(snapshot.docs.map(doc=>doc.data()),centers,active,barangays,scope.label,{month:month as string | undefined,now:Date.parse(summary.updatedAt)});
     res.json({
       data: {
         ...summary,
+        overview,
         scope,
         presentation: presentReportAnalytics(summary, scope.label),
       },

@@ -1,10 +1,12 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const express = require('express');
-let role = 'LGU_ADMIN', barangayId = 'wawa', fail = false;
+let role = 'LGU_ADMIN', barangayId = 'wawa', fail = false, failActive = false;
 const queries = [];
 const records = {
   reports: [{ type: 'road', barangayId: 'wawa', createdAt: '2026-10-01' }, { type: 'flood', barangayId: 'san-juan', createdAt: '2026-10-02' }],
+  evacuationCenters: [{id:'wc',barangayId:'wawa',name:'Wawa center',occupied:3,capacity:10},{id:'sc',barangayId:'san-juan',name:'San Juan center',occupied:1,capacity:4}],
+  activeEvacuations: [{id:'wh',householdId:'wh',barangayId:'wawa',memberIds:['a','b','c']},{id:'sh',householdId:'sh',barangayId:'san-juan',memberIds:['d']}],
   barangays: [{ id: 'wawa', name: 'Wawa' }, { id: 'san-juan', name: 'San Juan' }],
 };
 const db = {
@@ -12,7 +14,7 @@ const db = {
   collection(name) {
     let scoped = records[name];
     return { where(field, op, value) { queries.push({ name, field, value }); scoped = scoped.filter(item => item[field] === value); return this; },
-      async get() { if (fail) throw new Error('offline'); return { docs: scoped.map((item, i) => ({ id: item.id || String(i), data: () => item })) }; } };
+      async get() { if (fail || (failActive && name === 'activeEvacuations')) throw new Error('offline'); return { docs: scoped.map((item, i) => ({ id: item.id || String(i), data: () => item })) }; } };
   },
 };
 require.cache[require.resolve('../dist/config/firebaseAdmin')] = { exports: { db, auth: { verifyIdToken: async () => ({ uid: 'tester' }) } } };
@@ -33,7 +35,8 @@ test('official analytics include only the assigned barangay; administrators incl
   assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.equal(data.total, 1); assert.equal(data.scope.label, 'Wawa');
   assert.equal(data.presentation.scopeLabel, 'Wawa'); assert.equal(data.presentation.metrics[0][2], '1');
-  assert.deepEqual(queries, [{ name: 'reports', field: 'barangayId', value: 'wawa' }]);
+  assert.deepEqual(queries, ['reports','evacuationCenters','activeEvacuations'].map(name=>({name,field:'barangayId',value:'wawa'})));
+  assert.equal(data.overview.evacuation.totalEvacuees,3); assert.equal(data.overview.total,0);
   role = 'LGU_ADMIN'; queries.length = 0;
   const admin = await (await get()).json(); assert.equal(admin.data.total, 2); assert.equal(queries.length, 0);
 });
@@ -41,4 +44,8 @@ test('bad month filters are rejected and database errors are never successful ze
   role = 'LGU_ADMIN';
   for (const suffix of ['?month=2026-13', '?month=2026-10&month=2026-11', '?month=']) assert.equal((await get(suffix)).status, 400);
   fail = true; const response = await get(); assert.equal(response.status, 500); assert.equal((await response.json()).data, undefined); fail = false;
+});
+
+test('evacuation failures remain unavailable without suppressing authorized flood analytics',async()=>{
+ role='LGU_ADMIN';failActive=true;const response=await get();const {data}=await response.json();assert.equal(response.status,200);assert.equal(data.overview.total,1);assert.equal(data.overview.evacuation.activeAvailable,false);assert.equal(data.overview.evacuation.totalEvacuees,null);assert.equal(data.overview.evacuation.centersAvailable,true);failActive=false;
 });
