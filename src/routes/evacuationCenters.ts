@@ -3,6 +3,7 @@ import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 
 import { validText } from '../services/inputValidation';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 const router = Router();
 router.use(requireAuth, requireOfficial);
 
@@ -19,6 +20,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
     res.json({ data: centers });
   } catch (error) {
     console.error('List evacuation centers failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load evacuation centers.' });
   }
 });
@@ -50,6 +52,7 @@ router.get('/:id/occupants', async (req: AuthenticatedRequest, res) => {
     res.json({ data: households });
   } catch (error) {
     console.error('List evacuation occupants failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load current occupants.' });
   }
 });
@@ -98,6 +101,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     res.status(201).json({ data: { id: created.id, ...created.data() } });
   } catch (error) {
     console.error('Create evacuation center failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to register evacuation center.' });
   }
 });

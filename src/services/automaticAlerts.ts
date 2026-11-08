@@ -1,4 +1,5 @@
 import { automaticReportAlert, automaticReportId, automaticWeatherAlert, isUsableAutomaticWeather } from './automaticAlertPolicy';
+import { invalidateFirestoreReadCache } from './firestoreReadCache';
 
 export function createAutomaticAlertEngine(store: any, weather: { get(): Promise<any> }, clock = Date.now) {
   async function write(transaction: any, ref: any, previous: any, candidate: any, now: number) {
@@ -21,22 +22,26 @@ export function createAutomaticAlertEngine(store: any, weather: { get(): Promise
   }
   return {
     async syncReport(id: string) {
-      return store.runTransaction(async (transaction: any) => {
+      const changed = await store.runTransaction(async (transaction: any) => {
         // Re-read the report inside the transaction to avoid publishing a withdrawn approval.
         const report = await transaction.get(store.doc('reports/' + id));
         const ref = store.doc('alerts/' + automaticReportId(id));
         const old = await transaction.get(ref);
         return write(transaction, ref, old.data(), report.exists ? automaticReportAlert(id, report.data(), clock()) : null, clock());
       });
+      if (changed) invalidateFirestoreReadCache('auditLogs:');
+      return changed;
     },
     async checkWeather() {
       const result = await weather.get();
       if (!isUsableAutomaticWeather(result, clock())) return false; // Outages cannot announce all-clear.
-      return store.runTransaction(async (transaction: any) => {
+      const changed = await store.runTransaction(async (transaction: any) => {
         const ref = store.doc('alerts/automatic_weather');
         const previous = await transaction.get(ref);
         return write(transaction, ref, previous.data(), automaticWeatherAlert(result, clock()), clock());
       });
+      if (changed) invalidateFirestoreReadCache('auditLogs:');
+      return changed;
     },
   };
 }

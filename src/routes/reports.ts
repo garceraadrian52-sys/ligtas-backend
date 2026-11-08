@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { logAction } from '../services/auditLog';
+import { invalidateReportReads, listReports } from '../services/reportReads';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 import { validText, validDocumentId, validCoordinatePair } from '../services/inputValidation';
 const router = Router();
@@ -11,16 +13,11 @@ router.use(requireAuth, requireOfficial);
 // GET /reports
 router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
-    const reportsRef = db.collection('reports');
-    const query = req.user!.role === 'LGU_ADMIN'
-      ? reportsRef
-      : reportsRef.where('barangayId', '==', req.user!.barangayId);
-
-    const snapshot = await query.get();
-    const reports = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+    const reports = await listReports(req.user!.role === 'LGU_ADMIN' ? null : req.user!.barangayId);
     res.json({ data: reports });
   } catch (error) {
     console.error('List reports failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load reports.' });
   }
 });
@@ -39,6 +36,7 @@ router.get('/:id', async (req: AuthenticatedRequest, res) => {
     res.json({ data: { id: snapshot.id, ...data } });
   } catch (error) {
     console.error('Get report failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load report.' });
   }
 });
@@ -109,7 +107,9 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
       }
     });
 
-        const updated = await reportRef.get();
+    if (changed) invalidateReportReads();
+
+    const updated = await reportRef.get();
     const updatedData = updated.data()!;
 
     if (changed) await logAction({
@@ -130,6 +130,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
     if (error.message === 'NOT_VERIFIED') return res.status(409).json({ error: 'Verify the report before marking it resolved.' });
     if (error.message === 'ALREADY_RESOLVED') return res.status(409).json({ error: 'A report resolved by the LGU Admin cannot be reopened by a Barangay Official.' });
     console.error('Update report failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to update report.' });
   }
 });
@@ -185,6 +186,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     }
 
     const docRef = await db.collection('reports').add(baseData);
+    invalidateReportReads();
 
     await logAction({
       actorId: req.user!.uid,
@@ -201,6 +203,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     res.status(201).json({ data: { id: created.id, ...created.data() } });
   } catch (error) {
     console.error('Submit report failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to submit report.' });
   }
 });

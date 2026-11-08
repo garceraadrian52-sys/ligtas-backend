@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { logAction } from '../services/auditLog';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 const router = Router();
 
@@ -31,6 +32,7 @@ router.post('/', async (req, res) => {
     res.status(201).json({ data: { id: docRef.id, status: 'Pending' } });
   } catch (error) {
     console.error('Create access request failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to submit access request.' });
   }
 });
@@ -47,6 +49,7 @@ router.get('/', requireAuth, requireOfficial, async (req: AuthenticatedRequest, 
     res.json({ data: requests });
   } catch (error) {
     console.error('List access requests failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to load access requests.' });
   }
 });
@@ -90,6 +93,7 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
     res.json({ data: { id: updated.id, ...updated.data() } });
   } catch (error) {
     console.error('Update access request failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to update access request.' });
   }
 });

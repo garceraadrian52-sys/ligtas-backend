@@ -30,7 +30,9 @@ app.use(allowedOrigins.length
       return callback(new Error('Origin is not allowed by CORS.'));
     } })
   : cors());
-app.use(express.json());
+// Profile images are resized in the web client before upload and stored inline
+// with the user's Firestore profile. Keep the request limit bounded.
+app.use(express.json({ limit: '512kb' }));
 app.use('/auth', authRoutes);
 app.use('/users', usersRoutes);
 app.use('/reports', reportsRoutes);
