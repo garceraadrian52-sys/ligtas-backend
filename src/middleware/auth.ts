@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
 import { isFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { recordAuthenticatedActivity } from '../services/activityTracking';
-import { isMunicipalityAdmin } from '../services/roles';
+import { isMunicipalityAdmin, normalizeRole } from '../services/roles';
 
 export interface AuthenticatedRequest extends Request {
   user?: { uid: string; role: string; barangayId: string | null; name: string; email: string };
@@ -23,15 +23,16 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     const profile = profileSnap.data();
     if (!profile) return res.status(401).json({ error: 'User profile not found.' });
 
+    const role = normalizeRole(profile.role);
     req.user = {
       uid: decoded.uid,
-      role: String(profile.role ?? 'RESIDENT'),
+      role,
       barangayId: profile.barangayId ?? null,
       name: profile.name ?? profile.displayName ?? '',
       email: profile.email ?? decoded.email ?? '',
     };
-    req.profile = profile;
-    if (['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'].includes(String(profile.role))) {
+    req.profile = { ...profile, role };
+    if (['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'].includes(role)) {
       void recordAuthenticatedActivity(decoded.uid, decoded.auth_time).catch((activityError: any) => {
         console.error('Record authenticated activity failed:', activityError?.code ?? 'unknown');
       });

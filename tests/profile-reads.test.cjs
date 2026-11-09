@@ -58,7 +58,7 @@ test('profile GET reuses the authenticated profile snapshot', async () => {
   const { data } = await response.json();
 
   assert.equal(response.status, 200);
-  assert.deepEqual(data, { id: 'resident-1', ...profile });
+  assert.deepEqual(data, { id: 'resident-1', ...profile, email: 'resident@example.com' });
   assert.equal(documentReads, 1);
 });
 
@@ -83,24 +83,56 @@ test('profile PATCH returns the updated snapshot without a follow-up read', asyn
   assert.equal(typeof data.updatedAt._nanoseconds, 'number');
 });
 
-test('profile PATCH persists email, phone, barangay, and a bounded inline profile image', async () => {
+test('profile PATCH persists phone, barangay, and a bounded inline profile image without replacing email', async () => {
   documentReads = 0;
   documentWrites = 0;
   authUpdates.length = 0;
   const response = await request('', {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: '  new@example.com ', phone: '555-0300', barangayId: null, photoURL: 'data:image/jpeg;base64,YWJj' }),
+    body: JSON.stringify({ phone: '555-0300', barangayId: null, photoURL: 'data:image/jpeg;base64,YWJj' }),
   });
   const { data } = await response.json();
 
   assert.equal(response.status, 200);
   assert.equal(documentReads, 1);
   assert.equal(documentWrites, 1);
-  assert.equal(data.email, 'new@example.com');
+  assert.equal(data.email, 'resident@example.com');
   assert.equal(data.phone, '555-0300');
   assert.equal(data.photoURL, 'data:image/jpeg;base64,YWJj');
-  assert.deepEqual(authUpdates, [{ uid: 'resident-1', updates: { email: 'new@example.com' } }]);
+  assert.deepEqual(authUpdates, []);
+});
+
+test('profile PATCH rejects an unverified email change before updating any record', async () => {
+  documentReads = 0;
+  documentWrites = 0;
+  authUpdates.length = 0;
+  const response = await request('', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'new@example.com' }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(documentReads, 1);
+  assert.equal(documentWrites, 0);
+  assert.deepEqual(authUpdates, []);
+});
+
+test('empty optional contact values do not overwrite saved profile data', async () => {
+  documentReads = 0;
+  documentWrites = 0;
+  const response = await request('', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone: '  ', address: '' }),
+  });
+  const { data } = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(data.phone, '555-0300');
+  assert.equal(data.address, 'Wawa');
+  assert.equal(documentWrites, 1);
 });
 
 test('Barangay Officials cannot change their own barangay assignment', async () => {

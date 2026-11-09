@@ -3,6 +3,7 @@ import { Timestamp, FieldValue, type DocumentReference } from 'firebase-admin/fi
 import { db } from '../config/firebaseAdmin';
 import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision } from './notificationPolicy';
 import { assignDisplayIdIfMissing } from './recordDisplayIds';
+import { MUNICIPAL_ADMIN_ROLE_VALUES, normalizeRole } from './roles';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const now = () => Timestamp.now();
@@ -81,7 +82,7 @@ async function notifyAdmin(uid: string, kind: string, targetId: string, displayI
 }
 
 async function notifyAdmins(kind: string, targetId: string, displayId: string | undefined, title: string, body: string, eventKey = targetId) {
-  const admins = await db.collection('users').where('role', 'in', ['SUPER_ADMIN', 'LGU_ADMIN']).get();
+  const admins = await db.collection('users').where('role', 'in', MUNICIPAL_ADMIN_ROLE_VALUES).get();
   for (const admin of admins.docs) {
     await notifyAdmin(admin.id, kind, targetId, displayId, title, body, eventKey);
   }
@@ -144,7 +145,7 @@ function startAlertWatcher(onReady?: () => void) {
           const userData = user.data();
           const matches = inArea(alert, userData);
           console.log(`  User ${user.id} (role=${userData.role}, barangayId=${userData.barangayId}): inArea=${matches}`);
-          if (['SUPER_ADMIN', 'LGU_ADMIN'].includes(userData.role)) {
+          if (['SUPER_ADMIN', 'LGU_ADMIN'].includes(normalizeRole(userData.role))) {
             await notifyAdmin(user.id, 'alert', change.doc.id, alert.displayId, inboxTitle, inboxBody, alertRevisionId)
               .catch((error) => console.error('Queue admin alert inbox notification failed:', error));
           }

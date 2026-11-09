@@ -24,7 +24,7 @@ test('the real alert watcher recovers automatic publications after restart witho
   const exports={};
   vm.runInNewContext(readFileSync(require.resolve('../dist/services/notificationWorker'),'utf8'),{
     exports,setInterval:()=>0,console:{log(){},error(){}},Date,
-    require:name=>name==='node:crypto'?require(name):name.includes('firebaseAdmin')?{db:{collection}}:name.includes('notificationPolicy')?policy:
+    require:name=>name==='node:crypto'?require(name):name.includes('firebaseAdmin')?{db:{collection}}:name.includes('notificationPolicy')?policy:name.includes('roles')?require('../dist/services/roles'):
       name==='firebase-admin/firestore'?{Timestamp:{now:()=>({toMillis:()=>Date.now()}),fromMillis:value=>({toMillis:()=>value})},FieldValue:{}}:null,
   });
   exports.startNotificationWorkers(()=>ready++);

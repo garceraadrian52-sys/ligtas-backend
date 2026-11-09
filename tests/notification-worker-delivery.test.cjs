@@ -53,6 +53,7 @@ test('a newly published barangay alert queues one eligible device delivery and d
     require: name => name === 'node:crypto' ? require(name)
       : name.includes('firebaseAdmin') ? { db }
         : name.includes('notificationPolicy') ? policy
+          : name.includes('roles') ? require('../dist/services/roles')
           : name.includes('recordDisplayIds') ? { assignDisplayIdIfMissing: async () => null }
             : name === 'firebase-admin/firestore' ? {
               Timestamp: { now: () => ({ toMillis: () => Date.now() }), fromMillis: value => ({ toMillis: () => value }) },

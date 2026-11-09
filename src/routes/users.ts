@@ -6,6 +6,7 @@ import { logAction } from '../services/auditLog';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { firebaseAuthPhotoUrl, isValidEmail, isValidProfilePhoto } from '../services/profileFields';
 import { allocateDisplayId } from '../services/recordDisplayIds';
+import { normalizeRole, SUPER_ADMIN_ROLE_VALUES } from '../services/roles';
 
 const router = Router();
 const accountRoles = ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'] as const;
@@ -22,6 +23,19 @@ async function writeAudit(req: AuthenticatedRequest, action: string, targetId: s
     targetId,
     details,
   });
+}
+
+async function sendFirebasePasswordReset(email: string) {
+  const apiKey = process.env.FIREBASE_WEB_API_KEY;
+  if (!apiKey) throw Object.assign(new Error('AUTH_NOT_CONFIGURED'), { providerCode: 'AUTH_NOT_CONFIGURED' });
+  const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${apiKey}`, {
+    method: 'POST',
+    signal: AbortSignal.timeout(15000),
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestType: 'PASSWORD_RESET', email }),
+  });
+  const result: any = await response.json().catch(() => ({}));
+  if (!response.ok) throw Object.assign(new Error(String(result?.error?.message ?? 'UNKNOWN')), { providerCode: String(result?.error?.message ?? 'UNKNOWN') });
 }
 
 router.use(requireAuth);
@@ -51,9 +65,10 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
     const snapshot = await db.collection('users').get();
     const users = snapshot.docs
-      .filter(doc => accountRoles.includes(doc.data().role))
+      .filter(doc => accountRoles.includes(normalizeRole(doc.data().role) as AccountRole))
       .map(doc => {
         const item = doc.data();
+        const role = normalizeRole(item.role) as AccountRole;
         return {
           id: doc.id,
           displayId: item.displayId ?? null,
@@ -62,7 +77,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
           email: item.email ?? '',
           phone: item.phone ?? '',
           photoURL: item.photoURL ?? item.photoUrl ?? null,
-          role: item.role,
+          role,
           barangayId: item.barangayId ?? null,
           disabled: item.disabled === true,
           lastActiveAt: item.lastActiveAt ?? null,
@@ -141,6 +156,40 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   }
 });
 
+// POST /users/:userId/password-reset — send Firebase's secure reset link to another staff member.
+router.post('/:userId/password-reset', async (req: AuthenticatedRequest, res) => {
+  if (req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Only Super Admin can request password resets for other staff accounts.' });
+  const userId = req.params.userId;
+  if (!validDocumentId(userId)) return res.status(400).json({ error: 'Invalid user ID.' });
+  if (userId === req.user!.uid) return res.status(400).json({ error: 'Use your own verified password workflow in Settings.' });
+  if (!process.env.FIREBASE_WEB_API_KEY) return res.status(503).json({ error: 'Password reset is temporarily unavailable.' });
+  try {
+    const profileSnapshot = await db.doc(`users/${userId}`).get();
+    if (!profileSnapshot.exists) return res.status(404).json({ error: 'User not found.' });
+    if (!accountRoles.includes(normalizeRole(profileSnapshot.data()?.role) as AccountRole)) {
+      return res.status(403).json({ error: 'Resident accounts are not managed in this directory.' });
+    }
+    const target = await auth.getUser(userId);
+    if (target.disabled) return res.status(403).json({ error: 'This account has been disabled.' });
+    if (!target.email || !target.providerData?.some(provider => provider.providerId === 'password')) {
+      return res.status(400).json({ error: 'This account does not use email and password sign-in.' });
+    }
+    await sendFirebasePasswordReset(target.email);
+    await writeAudit(req, 'user_password_reset_requested', userId, { displayId: profileSnapshot.data()?.displayId ?? null })
+      .catch(error => console.error('Record password reset audit failed:', (error as any)?.code ?? 'unknown'));
+    res.json({ data: { sent: true } });
+  } catch (error: any) {
+    const code = String(error?.providerCode ?? error?.code ?? '');
+    if (code === 'auth/user-not-found' || code === 'EMAIL_NOT_FOUND') return res.status(404).json({ error: 'User not found.' });
+    if (code === 'auth/user-disabled' || code === 'USER_DISABLED') return res.status(403).json({ error: 'This account has been disabled.' });
+    if (code === 'TOO_MANY_ATTEMPTS_TRY_LATER') return res.status(429).json({ error: 'Too many reset requests. Please try again later.' });
+    if (code === 'AUTH_NOT_CONFIGURED') return res.status(503).json({ error: 'Password reset is temporarily unavailable.' });
+    console.error('Staff password reset request failed:', code || 'unknown');
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    res.status(503).json({ error: 'Password reset is temporarily unavailable. Please try again.' });
+  }
+});
+
 // PATCH /users/:userId — account permissions and status are controlled by Super Admin.
 router.patch('/:userId', async (req: AuthenticatedRequest, res) => {
   if (req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Only Super Admin can edit system accounts.' });
@@ -151,33 +200,34 @@ router.patch('/:userId', async (req: AuthenticatedRequest, res) => {
     const snapshot = await userRef.get();
     if (!snapshot.exists) return res.status(404).json({ error: 'User not found.' });
     const current = snapshot.data()!;
-    if (!accountRoles.includes(current.role)) return res.status(403).json({ error: 'Resident profiles are not managed in this directory.' });
+    if (!accountRoles.includes(normalizeRole(current.role) as AccountRole)) return res.status(403).json({ error: 'Resident profiles are not managed in this directory.' });
 
     const { name, email, phone, photoURL, role, barangayId, disabled } = req.body ?? {};
-    const nextRole = role ?? current.role;
+    const nextRole = role ?? normalizeRole(current.role);
     if (!accountRoles.includes(nextRole)) return res.status(400).json({ error: 'Choose Super Admin, LGU Admin, or Barangay Official.' });
     const nextBarangay = nextRole === 'BARANGAY_OFFICIAL' ? (barangayId === undefined ? current.barangayId : barangayId) : null;
     if (nextRole === 'BARANGAY_OFFICIAL' && !validDocumentId(nextBarangay)) return res.status(400).json({ error: 'A valid barangay assignment is required for officials.' });
     if (nextBarangay && !(await db.doc(`barangays/${nextBarangay}`).get()).exists) return res.status(400).json({ error: 'Barangay does not exist.' });
     if (name !== undefined && !validText(name, 200)) return res.status(400).json({ error: 'Enter a valid full name.' });
     if (email !== undefined && !isValidEmail(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+    if (email !== undefined && email.trim().toLowerCase() !== String(current.email ?? '').toLowerCase()) {
+      return res.status(400).json({ error: 'Email changes must be requested through the account holder’s verified workflow in Settings.' });
+    }
     if (phone !== undefined && (typeof phone !== 'string' || phone.length > 40)) return res.status(400).json({ error: 'Enter a valid phone number.' });
     if (photoURL !== undefined && !isValidProfilePhoto(photoURL)) return res.status(400).json({ error: 'Choose a valid profile image.' });
     if (disabled !== undefined && typeof disabled !== 'boolean') return res.status(400).json({ error: 'Account status is invalid.' });
     if (userId === req.user!.uid && (disabled === true || nextRole !== 'SUPER_ADMIN')) return res.status(400).json({ error: 'You cannot disable or change your own Super Admin account.' });
-    if (current.role === 'SUPER_ADMIN' && (nextRole !== 'SUPER_ADMIN' || disabled === true) && await countOtherActiveSuperAdmins(userId) === 0) {
+    if (normalizeRole(current.role) === 'SUPER_ADMIN' && (nextRole !== 'SUPER_ADMIN' || disabled === true) && await countOtherActiveSuperAdmins(userId) === 0) {
       return res.status(409).json({ error: 'Keep at least one active Super Admin account.' });
     }
 
     const updates: Record<string, unknown> = { updatedAt: new Date(), role: nextRole, barangayId: nextBarangay ?? null };
     if (name !== undefined) { updates.name = name.trim(); updates.displayName = name.trim(); }
-    if (email !== undefined) updates.email = email.trim().toLowerCase();
     if (phone !== undefined) updates.phone = phone.trim();
     if (photoURL !== undefined) updates.photoURL = photoURL;
     if (disabled !== undefined) updates.disabled = disabled;
     const authUpdates: Record<string, unknown> = {};
     if (name !== undefined) authUpdates.displayName = name.trim();
-    if (email !== undefined && email.trim().toLowerCase() !== String(current.email ?? '').toLowerCase()) authUpdates.email = email.trim().toLowerCase();
     const hostedPhotoURL = firebaseAuthPhotoUrl(photoURL);
     if (hostedPhotoURL) authUpdates.photoURL = hostedPhotoURL;
     if (disabled !== undefined) authUpdates.disabled = disabled;
@@ -205,8 +255,9 @@ router.delete('/:userId', async (req: AuthenticatedRequest, res) => {
     const snapshot = await userRef.get();
     if (!snapshot.exists) return res.status(404).json({ error: 'User not found.' });
     const data = snapshot.data()!;
-    if (!accountRoles.includes(data.role)) return res.status(403).json({ error: 'Resident accounts are not deleted from this directory.' });
-    if (data.role === 'SUPER_ADMIN' && await countOtherActiveSuperAdmins(userId) === 0) return res.status(409).json({ error: 'Keep at least one active Super Admin account.' });
+    const role = normalizeRole(data.role) as AccountRole;
+    if (!accountRoles.includes(role)) return res.status(403).json({ error: 'Resident accounts are not deleted from this directory.' });
+    if (role === 'SUPER_ADMIN' && await countOtherActiveSuperAdmins(userId) === 0) return res.status(409).json({ error: 'Keep at least one active Super Admin account.' });
     await auth.deleteUser(userId);
     await userRef.delete();
     await writeAudit(req, 'user_deleted', userId, { email: data.email, role: data.role });
@@ -219,8 +270,8 @@ router.delete('/:userId', async (req: AuthenticatedRequest, res) => {
 });
 
 async function countOtherActiveSuperAdmins(exceptUserId: string) {
-  const snapshot = await db.collection('users').where('role', '==', 'SUPER_ADMIN').get();
-  return snapshot.docs.filter(doc => doc.id !== exceptUserId && doc.data().disabled !== true).length;
+  const snapshot = await db.collection('users').where('role', 'in', SUPER_ADMIN_ROLE_VALUES).get();
+  return snapshot.docs.filter(doc => doc.id !== exceptUserId && normalizeRole(doc.data().role) === 'SUPER_ADMIN' && doc.data().disabled !== true).length;
 }
 
 export default router;

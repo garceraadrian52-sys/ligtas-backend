@@ -43,25 +43,42 @@ after(() => {
   server.close();
 });
 
-test('Super Admin updates email, name, phone and profile image while optional barangay stays null', async () => {
+test('Super Admin updates name, phone and profile image while optional barangay stays null', async () => {
   writes = 0;
   authUpdate = null;
   authFailure = null;
   const response = await fetch(base, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer valid-token' },
-    body: JSON.stringify({ name: 'Updated Name', email: 'updated@example.com', phone: '555-0200', photoURL: 'data:image/jpeg;base64,YWJj', role: 'LGU_ADMIN', barangayId: null, disabled: false }),
+    body: JSON.stringify({ name: 'Updated Name', phone: '555-0200', photoURL: 'data:image/jpeg;base64,YWJj', role: 'LGU_ADMIN', barangayId: null, disabled: false }),
   });
   const { data } = await response.json();
 
   assert.equal(response.status, 200);
   assert.equal(writes, 1);
   assert.equal(data.name, 'Updated Name');
-  assert.equal(data.email, 'updated@example.com');
+  assert.equal(data.email, 'current@example.com');
   assert.equal(data.phone, '555-0200');
   assert.equal(data.photoURL, 'data:image/jpeg;base64,YWJj');
   assert.equal(data.barangayId, null);
-  assert.deepEqual(authUpdate, { displayName: 'Updated Name', email: 'updated@example.com', disabled: false });
+  assert.deepEqual(authUpdate, { displayName: 'Updated Name', disabled: false });
+});
+
+test('Super Admin cannot silently change another user email through User Management', async () => {
+  writes = 0;
+  authUpdate = null;
+  const response = await fetch(base, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ email: 'unverified@example.com' }),
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.match(payload.error, /verified workflow in Settings/);
+  assert.equal(writes, 0);
+  assert.equal(account.email, 'current@example.com');
+  assert.equal(authUpdate, null);
 });
 
 test('Super Admin profile edits reject invalid image URLs before changing the account', async () => {

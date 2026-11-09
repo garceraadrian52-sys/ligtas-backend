@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
+import { normalizeRole } from '../services/roles';
 
 const router = Router();
 const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY;
@@ -87,7 +88,7 @@ router.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Account profile not found.' });
     }
 
-    const role = String(profile.role ?? 'RESIDENT');
+    const role = normalizeRole(profile.role);
     if (!['LGU_ADMIN', 'SUPER_ADMIN'].includes(role)) {
       return res.status(403).json({ error: 'Only Super Admin or LGU/MDRRMO personnel can access the LigTAS web dashboard.' });
     }
