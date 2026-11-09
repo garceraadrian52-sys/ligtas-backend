@@ -2,7 +2,13 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 
 require.cache[require.resolve('../dist/config/firebaseAdmin')] = { exports: { db: {} } };
-const { createActivityRecorder } = require('../dist/services/activityTracking');
+const { createActivityRecorder, ACTIVITY_TRACKED_ROLES, shouldTrackAuthenticatedActivity } = require('../dist/services/activityTracking');
+
+test('activity tracking includes every supported web and mobile account role', () => {
+  assert.deepEqual([...ACTIVITY_TRACKED_ROLES], ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL', 'RESIDENT']);
+  for (const role of ACTIVITY_TRACKED_ROLES) assert.equal(shouldTrackAuthenticatedActivity(role), true, role);
+  assert.equal(shouldTrackAuthenticatedActivity(''), false);
+});
 
 test('authenticated activity writes are throttled and login time is derived from verified auth_time', async () => {
   let now = 10_000;

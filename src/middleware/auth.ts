@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
 import { isFirestoreResourceExhausted } from '../services/firestoreErrors';
-import { recordAuthenticatedActivity } from '../services/activityTracking';
+import { recordAuthenticatedActivity, shouldTrackAuthenticatedActivity } from '../services/activityTracking';
 import { isMunicipalityAdmin, normalizeRole } from '../services/roles';
 
 export interface AuthenticatedRequest extends Request {
@@ -32,7 +32,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       email: profile.email ?? decoded.email ?? '',
     };
     req.profile = { ...profile, role };
-    if (['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'].includes(role)) {
+    if (shouldTrackAuthenticatedActivity(role)) {
       void recordAuthenticatedActivity(decoded.uid, decoded.auth_time).catch((activityError: any) => {
         console.error('Record authenticated activity failed:', activityError?.code ?? 'unknown');
       });

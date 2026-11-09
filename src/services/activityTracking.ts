@@ -2,6 +2,13 @@ import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
 
 export const ACTIVITY_WRITE_INTERVAL_MS = 15 * 60 * 1000;
+export const ACTIVITY_TRACKED_ROLES = Object.freeze([
+  'SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL', 'RESIDENT',
+] as const);
+
+export function shouldTrackAuthenticatedActivity(role: string) {
+  return (ACTIVITY_TRACKED_ROLES as readonly string[]).includes(role);
+}
 
 type ActivityWrite = (uid: string, updates: Record<string, unknown>) => Promise<unknown>;
 

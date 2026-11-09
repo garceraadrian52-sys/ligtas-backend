@@ -14,7 +14,10 @@ const db = {
 
 require.cache[require.resolve('../dist/config/firebaseAdmin')] = { exports: { auth, db } };
 require.cache[require.resolve('../dist/services/activityTracking')] = {
-  exports: { recordAuthenticatedActivity: async () => undefined },
+  exports: {
+    recordAuthenticatedActivity: async () => undefined,
+    shouldTrackAuthenticatedActivity: role => ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL', 'RESIDENT'].includes(role),
+  },
 };
 require.cache[require.resolve('../dist/services/auditLog')] = { exports: { logAction: async () => undefined } };
 
