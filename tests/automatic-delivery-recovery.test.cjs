@@ -15,8 +15,9 @@ test('the real alert watcher recovers automatic publications after restart witho
   const user={id:'resident',data:()=>resident};
   const device={ref:{path:'users/resident/devices/phone'}};
   function collection(name) {
-    const query={onSnapshot:callback=>callbacks.set(name,callback),where:()=>query,orderBy:()=>query,limit:()=>query,startAfter:()=>query,
-      get:async()=>({docs:name==='users'?[user]:name.includes('/devices')?[device]:[],size:1}),
+    let adminRoleQuery=false;
+    const query={onSnapshot:callback=>callbacks.set(name,callback),where:(field,operator)=>{if(name==='users'&&field==='role'&&operator==='in')adminRoleQuery=true;return query},orderBy:()=>query,limit:()=>query,startAfter:()=>query,
+      get:async()=>({docs:name==='users'&&adminRoleQuery?[]:name==='users'?[user]:name.includes('/devices')?[device]:[],size:name==='users'&&adminRoleQuery?0:1}),
       doc:id=>({get:async()=>({data:()=>jobs.get(id)}),create:async data=>{if(jobs.has(id))throw {code:6};jobs.set(id,data);}})};
     return query;
   }

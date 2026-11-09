@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
+import { logAction } from '../services/auditLog';
+import { areNotificationWorkersStarted } from '../services/notificationWorker';
 
 const router = Router();
 router.use(requireAuth);
@@ -14,6 +16,26 @@ const defaultPreferences = {
   notifications: { email: true, push: true, critical: true, reports: true },
 };
 const notificationKeys = ['email', 'push', 'critical', 'reports'] as const;
+const backupCollections = ['users', 'reports', 'alerts', 'evacuationCenters', 'roadConditions'] as const;
+const backupRecordLimit = 500;
+
+function isSuperAdmin(req: AuthenticatedRequest, res: any) {
+  if (req.user?.role === 'SUPER_ADMIN') return true;
+  res.status(403).json({ error: 'Only Super Admin can access system administration.' });
+  return false;
+}
+
+function safeExportValue(value: any): any {
+  if (typeof value === 'string') return /^data:[^;]+;base64,/i.test(value) ? '[embedded image omitted from partial backup]' : value;
+  if (value == null || typeof value !== 'object') return value;
+  if (typeof value.toDate === 'function') return value.toDate().toISOString();
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(safeExportValue);
+  const omitted = /(password|token|secret|private.?key|service.?account|api.?key)/i;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !omitted.test(key))
+    .map(([key, child]) => [key, safeExportValue(child)]));
+}
 
 router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
@@ -82,9 +104,74 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// Backups are intentionally reported as unavailable until a real export is configured.
-router.post('/backup', (_req, res) => {
-  res.status(501).json({ error: 'Backup downloads are not configured yet.' });
+router.get('/backup/status', async (req: AuthenticatedRequest, res) => {
+  if (!isSuperAdmin(req, res)) return;
+  try {
+    const snapshot = await db.doc('systemSettings/backupStatus').get();
+    res.json({ data: snapshot.exists ? snapshot.data() : { lastBackupAt: null, collections: [], partial: true } });
+  } catch (error) {
+    console.error('Load backup status failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    res.status(500).json({ error: 'Failed to load backup status.' });
+  }
+});
+
+router.post('/backup', async (req: AuthenticatedRequest, res) => {
+  if (!isSuperAdmin(req, res)) return;
+  try {
+    const results = await Promise.all(backupCollections.map(async collection => {
+      const snapshot = await db.collection(collection).limit(backupRecordLimit + 1).get();
+      return {
+        collection,
+        records: snapshot.docs.slice(0, backupRecordLimit).map(doc => ({ ...safeExportValue(doc.data()), id: doc.id })),
+        truncated: snapshot.size > backupRecordLimit,
+      };
+    }));
+    const exportedAt = new Date();
+    const summary = {
+      lastBackupAt: exportedAt,
+      collections: results.map(({ collection, records, truncated }) => ({ name: collection, count: records.length, truncated })),
+      partial: true,
+      createdBy: req.user!.uid,
+    };
+    await db.doc('systemSettings/backupStatus').set(summary, { merge: true });
+    await logAction({
+      actorId: req.user!.uid, actorName: req.user!.name, actorRole: req.user!.role, actorEmail: req.user!.email,
+      action: 'partial_backup_exported', targetType: 'system', targetId: 'partial-backup',
+      details: { collections: summary.collections },
+    }).catch(error => console.error('Record partial backup export audit failed:', error));
+    res.json({ data: {
+      format: 'ligtas-partial-backup-v1',
+      exportedAt: exportedAt.toISOString(),
+      partial: true,
+      restoreSupported: false,
+      omitted: ['device registrations', 'private credentials', 'embedded image data', 'subcollections'],
+      collections: results.map(({ collection, records, truncated }) => ({ name: collection, records, truncated })),
+    } });
+  } catch (error) {
+    console.error('Create partial backup failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    res.status(500).json({ error: 'Failed to create partial backup export.' });
+  }
+});
+
+router.get('/system-status', async (req: AuthenticatedRequest, res) => {
+  if (!isSuperAdmin(req, res)) return;
+  let database: 'online' | 'unavailable' = 'online';
+  try {
+    await db.doc('systemSettings/statusProbe').get();
+  } catch {
+    database = 'unavailable';
+  }
+  const configuredUpdatedAt = process.env.LIGTAS_LAST_UPDATED;
+  const parsedUpdatedAt = configuredUpdatedAt ? Date.parse(configuredUpdatedAt) : NaN;
+  res.json({ data: {
+    version: process.env.LIGTAS_SYSTEM_VERSION || '1.0',
+    lastUpdated: Number.isFinite(parsedUpdatedAt) ? new Date(parsedUpdatedAt).toISOString() : null,
+    api: 'online',
+    database,
+    notifications: areNotificationWorkersStarted() ? 'running' : 'disabled',
+  } });
 });
 
 export default router;

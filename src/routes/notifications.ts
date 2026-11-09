@@ -11,7 +11,7 @@ router.use(requireAuth);
 router.get('/inbox', async (req: AuthenticatedRequest, res) => {
   try {
     const snapshot = await db.collection('notificationDeliveries').where('userId', '==', req.user!.uid)
-      .select('title', 'body', 'description', 'kind', 'type', 'createdAt', 'read').get();
+      .select('title', 'body', 'description', 'kind', 'type', 'createdAt', 'read', 'targetId', 'targetPath', 'displayId').get();
     const items = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
     const milliseconds = (value: any) => value?.toMillis?.() ?? (value?.seconds ? value.seconds * 1000 : Date.parse(value) || 0);
     items.sort((a: any, b: any) => milliseconds(b.createdAt) - milliseconds(a.createdAt) || a.id.localeCompare(b.id));

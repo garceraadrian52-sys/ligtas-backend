@@ -58,6 +58,35 @@ async function queueForUser(uid: string, payload: any, revision: string, knownPr
   }
 }
 
+async function notifyAdmin(uid: string, kind: string, targetId: string, displayId: string | undefined, title: string, body: string, eventKey = targetId) {
+  const targetPath = kind === 'report' ? '/Reports_Management' : '/Alerts_Management';
+  const id = hash(`admin-inbox:${kind}:${targetId}:${eventKey}:${uid}`);
+  try {
+    await deliveries.doc(id).create({
+      userId: uid,
+      kind,
+      targetId,
+      ...(displayId ? { displayId } : {}),
+      targetPath,
+      title,
+      body,
+      state: 'inbox',
+      read: false,
+      createdAt: now(),
+      expiresAt: later(90 * 24 * 3600000),
+    });
+  } catch (error: any) {
+    if (error.code !== 6 && error.code !== 'already-exists') throw error;
+  }
+}
+
+async function notifyAdmins(kind: string, targetId: string, displayId: string | undefined, title: string, body: string, eventKey = targetId) {
+  const admins = await db.collection('users').where('role', 'in', ['SUPER_ADMIN', 'LGU_ADMIN']).get();
+  for (const admin of admins.docs) {
+    await notifyAdmin(admin.id, kind, targetId, displayId, title, body, eventKey);
+  }
+}
+
 // --- Watchers (kapalit ng onDocumentWritten Cloud Function triggers) ---
 
 const alertCache = new Map<string, any>();
@@ -97,8 +126,12 @@ function startAlertWatcher(onReady?: () => void) {
       }
       console.log(`Processing published alert: ${change.doc.id}`);
 
+      const alertRevisionId = alertRevision(change.doc.id, alert);
+      const inboxTitle = `Alert published: ${String(alert.title ?? 'LigTAS advisory').slice(0, 100)}`;
+      const inboxBody = `${String(alert.message ?? alert.description ?? '').slice(0, 350)} Open the alert management page for details.`;
+
       const kind = kindForAlert(alert);
-      const revision = alertRevision(change.doc.id, alert);
+      const revision = alertRevisionId;
       const senderName = alert.createdByName || 'LGU/MDRRMO';
       let cursor;
       let usersChecked = 0;
@@ -111,6 +144,10 @@ function startAlertWatcher(onReady?: () => void) {
           const userData = user.data();
           const matches = inArea(alert, userData);
           console.log(`  User ${user.id} (role=${userData.role}, barangayId=${userData.barangayId}): inArea=${matches}`);
+          if (['SUPER_ADMIN', 'LGU_ADMIN'].includes(userData.role)) {
+            await notifyAdmin(user.id, 'alert', change.doc.id, alert.displayId, inboxTitle, inboxBody, alertRevisionId)
+              .catch((error) => console.error('Queue admin alert inbox notification failed:', error));
+          }
           if (matches) {
             await queueForUser(user.id, {
               kind, targetId: change.doc.id, sourcePath: change.doc.ref.path, revision,
@@ -147,6 +184,12 @@ function startReportWatcher() {
 
       if (reportsReady && change.type === 'added' && !(typeof report.displayId === 'string' && report.displayId)) {
         await assignDisplayIdIfMissing(db, 'reports', change.doc.ref).catch((error) => console.error('Assign report display ID failed:', error));
+      }
+
+      if (change.type === 'added') {
+        await notifyAdmins('report', change.doc.id, report.displayId, 'New report submitted',
+          `${String(report.location ?? 'A resident location').slice(0, 180)}. Open report management to review.`)
+          .catch((error) => console.error('Queue admin report inbox notification failed:', error));
       }
 
       const status = String(report?.verification ?? report?.status ?? '').toLowerCase();
@@ -283,7 +326,7 @@ async function processDelivery(ref: DocumentReference) {
 
 function startDeliveryWorker() {
   // Agad na pagproseso ng bagong deliveries (kapalit ng dispatchQueuedNotification trigger)
-  deliveries.onSnapshot(async (snapshot) => {
+  deliveries.where('state', '==', 'pending').onSnapshot(async (snapshot) => {
     for (const change of snapshot.docChanges()) {
       if (change.type === 'added') {
         console.log(`New delivery queued: ${change.doc.id}`);
@@ -312,6 +355,10 @@ function startDeliveryWorker() {
 }
 
 let notificationWorkersStarted = false;
+export function areNotificationWorkersStarted() {
+  return notificationWorkersStarted;
+}
+
 export function startNotificationWorkers(onAlertsReady?: () => void) {
   if (notificationWorkersStarted) return;
   notificationWorkersStarted = true;

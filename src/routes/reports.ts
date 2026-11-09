@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
+import { isMunicipalityAdmin } from '../services/roles';
 import { logAction } from '../services/auditLog';
 import { invalidateReportReads, listReports } from '../services/reportReads';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
@@ -14,7 +15,7 @@ router.use(requireAuth, requireOfficial);
 // GET /reports
 router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
-    const reports = await listReports(req.user!.role === 'LGU_ADMIN' ? null : req.user!.barangayId);
+    const reports = await listReports(isMunicipalityAdmin(req.user!.role) ? null : req.user!.barangayId);
     res.json({ data: reports });
   } catch (error) {
     console.error('List reports failed:', error);
@@ -30,7 +31,7 @@ router.get('/:id', async (req: AuthenticatedRequest, res) => {
     if (!snapshot.exists) return res.status(404).json({ error: 'Report not found.' });
 
     const data = snapshot.data()!;
-    if (req.user!.role !== 'LGU_ADMIN' && data.barangayId !== req.user!.barangayId) {
+    if (!isMunicipalityAdmin(req.user!.role) && data.barangayId !== req.user!.barangayId) {
       return res.status(403).json({ error: 'This report belongs to another barangay.' });
     }
 
@@ -46,8 +47,10 @@ router.get('/:id', async (req: AuthenticatedRequest, res) => {
 router.patch('/:id', async (req: AuthenticatedRequest, res) => {
   const { status } = req.body ?? {};
   const resolving = status === 'Resolved';
-  if (resolving ? req.user!.role !== 'LGU_ADMIN' : req.user!.role !== 'BARANGAY_OFFICIAL' || !req.user!.barangayId) {
-    return res.status(403).json({ error: resolving ? 'Only the LGU Admin can mark a report as Resolved.' : 'Only the assigned Barangay Official can approve or reject resident reports.' });
+  const municipalityAdmin = isMunicipalityAdmin(req.user!.role);
+  const superAdmin = req.user!.role === 'SUPER_ADMIN';
+  if (resolving ? !municipalityAdmin : !superAdmin && (req.user!.role !== 'BARANGAY_OFFICIAL' || !req.user!.barangayId)) {
+    return res.status(403).json({ error: resolving ? 'Only municipality administrators can mark a report as Resolved.' : 'Only Super Admin or the assigned Barangay Official can review reports.' });
   }
   if (!['Pending', 'Verified', 'Rejected', 'Resolved'].includes(status)) {
     return res.status(400).json({ error: 'status must be Pending, Verified, Rejected, or Resolved.' });
@@ -62,7 +65,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
       if (!snapshot.exists) throw new Error('NOT_FOUND');
 
       const data = snapshot.data()!;
-      if (!resolving && data.barangayId !== req.user!.barangayId) {
+      if (!resolving && !superAdmin && data.barangayId !== req.user!.barangayId) {
         throw new Error('FORBIDDEN');
       }
 
@@ -152,7 +155,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   if (!validCoordinatePair(latitude, longitude)) return res.status(400).json({ error: 'Enter valid latitude and longitude together.' });
   if ([waterLevel, roadStatus, floodingLevel, cause].some(value => value != null && !validText(value, 300))) return res.status(400).json({ error: 'Report details must be text of at most 300 characters.' });
   if (barangayId != null && !validDocumentId(barangayId)) return res.status(400).json({ error: 'Invalid barangay ID.' });
-  const targetBarangayId = req.user!.role === 'LGU_ADMIN' ? (barangayId ?? null) : req.user!.barangayId;
+  const targetBarangayId = isMunicipalityAdmin(req.user!.role) ? (barangayId ?? null) : req.user!.barangayId;
 
   try {
     if (targetBarangayId && !(await db.doc('barangays/' + targetBarangayId).get()).exists) return res.status(400).json({ error: 'Barangay does not exist.' });

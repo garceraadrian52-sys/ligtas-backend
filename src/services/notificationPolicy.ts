@@ -16,7 +16,7 @@ export function published(data: any, now = Date.now()) {
 }
 
 export function inArea(data: any, user: any) {
-  if (['LGU_ADMIN', 'lgu_mdrrmo', 'lguAdmin', 'mdrrmo'].includes(user.role) || data.coverageArea === 'municipality' || data.locationScope?.type === 'municipality') return true;
+  if (['SUPER_ADMIN', 'LGU_ADMIN', 'lgu_mdrrmo', 'lguAdmin', 'mdrrmo'].includes(user.role) || data.coverageArea === 'municipality' || data.locationScope?.type === 'municipality') return true;
   const values = data.locationScope?.barangayIds ?? data.barangayIds ?? (data.barangayId ? [data.barangayId] : []);
   if (!Array.isArray(values)) return false;
   if (values.length === 0) return data.coverageArea !== 'barangay' && data.locationScope?.type !== 'barangay';

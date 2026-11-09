@@ -29,7 +29,7 @@ test('analytics enforces sign-in and official role before reading data', async (
   role = 'RESIDENT'; assert.equal((await get()).status, 403);
   role = 'BARANGAY_OFFICIAL'; barangayId = null; assert.equal((await get()).status, 403);
 });
-test('official analytics include only the assigned barangay; administrators include all', async () => {
+test('official analytics include only the assigned barangay; LGU and Super Admin include all', async () => {
   role = 'BARANGAY_OFFICIAL'; barangayId = 'wawa'; queries.length = 0;
   const response = await get('?month=2026-10'); const { data } = await response.json();
   assert.equal(response.status, 200); assert.equal(response.headers.get('cache-control'), 'no-store');
@@ -39,6 +39,8 @@ test('official analytics include only the assigned barangay; administrators incl
   assert.equal(data.overview.evacuation.totalEvacuees,3); assert.equal(data.overview.total,0);
   role = 'LGU_ADMIN'; queries.length = 0;
   const admin = await (await get()).json(); assert.equal(admin.data.total, 2); assert.equal(queries.length, 0);
+  role = 'SUPER_ADMIN'; queries.length = 0;
+  const superAdmin = await (await get()).json(); assert.equal(superAdmin.data.total, 2); assert.equal(queries.length, 0);
 });
 test('bad month filters are rejected and database errors are never successful zero counts', async () => {
   role = 'LGU_ADMIN';

@@ -9,8 +9,8 @@ router.use(requireAuth, requireOfficial);
 
 // GET /audit-logs — LGU_ADMIN lang makakakita ng buong log
 router.get('/', async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'LGU_ADMIN') {
-    return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can view audit logs.' });
+  if (!['LGU_ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can view audit logs.' });
   }
 
   try {

@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { db } from './config/firebaseAdmin';
-import { startNotificationWorkers } from './services/notificationWorker';
+import { areNotificationWorkersStarted, startNotificationWorkers } from './services/notificationWorker';
 import authRoutes from './routes/auth';
 import usersRoutes from './routes/users';
 import reportsRoutes from './routes/reports';
@@ -54,7 +54,8 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     message: 'LigTAS backend is running',
     database: 'not_checked',
-    notificationWorkersEnabled: process.env.ENABLE_NOTIFICATION_WORKERS === 'true',
+    systemVersion: process.env.LIGTAS_SYSTEM_VERSION || '1.0',
+    notificationWorkersEnabled: areNotificationWorkersStarted(),
   });
 });
 

@@ -14,6 +14,7 @@ after(()=>{server.closeAllConnections();server.close();});
 test('water trend uses only the authorized report snapshot while administrators include all local barangays',async()=>{
   role='BARANGAY_OFFICIAL';const official=await (await fetch(base+'/dashboard')).json();assert.equal(official.data.waterTrend.count,1);
   role='LGU_ADMIN';const admin=await (await fetch(base+'/dashboard')).json();assert.equal(admin.data.waterTrend.count,2);
+  role='SUPER_ADMIN';const superAdmin=await (await fetch(base+'/dashboard')).json();assert.equal(superAdmin.data.waterTrend.count,2);
 });
 test('weather is independent of dashboard records and caller-supplied locations do not change its scope',async()=>{
   const result=await fetch(base+'/dashboard/weather?latitude=0&longitude=0');assert.equal(result.headers.get('cache-control'),'no-store');

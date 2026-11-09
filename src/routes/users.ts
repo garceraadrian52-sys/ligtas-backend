@@ -10,12 +10,6 @@ import { allocateDisplayId } from '../services/recordDisplayIds';
 const router = Router();
 const accountRoles = ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'] as const;
 type AccountRole = typeof accountRoles[number];
-const bootstrapRef = db.doc('systemSettings/superAdminBootstrap');
-
-async function hasActiveSuperAdmin() {
-  const snapshot = await db.collection('users').where('role', '==', 'SUPER_ADMIN').get();
-  return snapshot.docs.some(doc => doc.data().disabled !== true);
-}
 
 async function writeAudit(req: AuthenticatedRequest, action: string, targetId: string, details: Record<string, unknown>) {
   await logAction({
@@ -38,12 +32,11 @@ router.get('/access', async (req: AuthenticatedRequest, res) => {
     return res.status(403).json({ error: 'Only Super Admin or LGU Admin can access account setup.' });
   }
   try {
-    const isSuperAdmin = req.user!.role === 'SUPER_ADMIN';
-    const hasSuperAdmin = await hasActiveSuperAdmin();
     res.json({ data: {
-      canManage: isSuperAdmin,
-      canBootstrapSuperAdmin: req.user!.role === 'LGU_ADMIN' && !hasSuperAdmin,
-      visibleRoles: isSuperAdmin ? accountRoles : hasSuperAdmin ? [] : ['SUPER_ADMIN'],
+      canView: true,
+      canManage: req.user!.role === 'SUPER_ADMIN',
+      canBootstrapSuperAdmin: false,
+      visibleRoles: req.user!.role === 'SUPER_ADMIN' ? accountRoles : [],
     } });
   } catch (error) {
     console.error('Load user access failed:', error);
@@ -52,14 +45,31 @@ router.get('/access', async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// GET /users — residents stay in Firestore for the mobile app, but are not part of this directory.
+// GET /users — Super Admin manages accounts; LGU Admin receives a read-only directory.
 router.get('/', async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Only Super Admin can view system accounts.' });
+  if (!['SUPER_ADMIN', 'LGU_ADMIN'].includes(req.user!.role)) return res.status(403).json({ error: 'Only Super Admin or LGU Admin can view the account directory.' });
   try {
     const snapshot = await db.collection('users').get();
     const users = snapshot.docs
-      .map(doc => ({ id: doc.id, ...doc.data() }))
-      .filter((item: any) => accountRoles.includes(item.role));
+      .filter(doc => accountRoles.includes(doc.data().role))
+      .map(doc => {
+        const item = doc.data();
+        return {
+          id: doc.id,
+          displayId: item.displayId ?? null,
+          name: item.name ?? item.displayName ?? '',
+          displayName: item.displayName ?? item.name ?? '',
+          email: item.email ?? '',
+          phone: item.phone ?? '',
+          photoURL: item.photoURL ?? item.photoUrl ?? null,
+          role: item.role,
+          barangayId: item.barangayId ?? null,
+          disabled: item.disabled === true,
+          lastActiveAt: item.lastActiveAt ?? null,
+          lastLoginAt: item.lastLoginAt ?? null,
+          createdAt: item.createdAt ?? null,
+        };
+      });
     res.json({ data: users });
   } catch (error) {
     console.error('List users failed:', error);
@@ -68,9 +78,9 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// POST /users — Super Admin creates operational accounts. An LGU Admin may bootstrap
-// the first Super Admin so an existing installation can migrate safely.
+// POST /users — only Super Admin can create operational accounts.
 router.post('/', async (req: AuthenticatedRequest, res) => {
+  if (req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Only Super Admin can create accounts.' });
   const { email, name, phone, photoURL, role, barangayId, password, disabled } = req.body ?? {};
   if (!isValidEmail(email) || !validText(name, 200) || !validText(password, 4096)) {
     return res.status(400).json({ error: 'Enter a valid email, full name, and initial password.' });
@@ -81,11 +91,6 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters.' });
   if (role === 'BARANGAY_OFFICIAL' && !validDocumentId(barangayId)) return res.status(400).json({ error: 'A valid barangay assignment is required for officials.' });
   if (barangayId != null && !validDocumentId(barangayId)) return res.status(400).json({ error: 'Invalid barangay ID.' });
-
-  const isSuperAdmin = req.user!.role === 'SUPER_ADMIN';
-  const isBootstrap = req.user!.role === 'LGU_ADMIN' && role === 'SUPER_ADMIN';
-  if (!isSuperAdmin && !isBootstrap) return res.status(403).json({ error: 'Only Super Admin can create accounts. The LGU Admin can create the initial Super Admin account.' });
-  if (isBootstrap && await hasActiveSuperAdmin()) return res.status(403).json({ error: 'A Super Admin account already exists. Only a Super Admin can create more accounts.' });
 
   try {
     if (barangayId && !(await db.doc(`barangays/${barangayId}`).get()).exists) {
@@ -110,33 +115,27 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
 
     let displayId: string;
     try {
-      if (isBootstrap) {
-        displayId = await db.runTransaction(async transaction => {
-          const lock = await transaction.get(bootstrapRef);
-          if (lock.exists) throw Object.assign(new Error('A Super Admin account has already been bootstrapped.'), { code: 'super-admin-exists' });
-          const displayId = await allocateDisplayId(transaction, db, 'users');
-          transaction.create(bootstrapRef, { userId: userRecord.uid, createdAt: new Date() });
-          transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, displayId });
-          return displayId;
-        });
-      } else {
-        displayId = await db.runTransaction(async transaction => {
-          const displayId = await allocateDisplayId(transaction, db, 'users');
-          transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, displayId });
-          return displayId;
-        });
-      }
-    } catch (error) {
+      displayId = await db.runTransaction(async transaction => {
+        const nextDisplayId = await allocateDisplayId(transaction, db, 'users');
+        transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, displayId: nextDisplayId });
+        return nextDisplayId;
+      });
+    } catch (profileError) {
       await auth.deleteUser(userRecord.uid).catch(() => {});
-      throw error;
+      throw profileError;
     }
 
-    await writeAudit(req, 'user_created', userRecord.uid, { email: profile.email, role, barangayId: profile.barangayId });
+    try {
+      await writeAudit(req, 'user_created', userRecord.uid, { email: profile.email, role, barangayId: profile.barangayId });
+    } catch (auditError) {
+      await db.doc(`users/${userRecord.uid}`).delete().catch(() => {});
+      await auth.deleteUser(userRecord.uid).catch(() => {});
+      throw auditError;
+    }
     res.status(201).json({ data: { id: userRecord.uid, ...profile, displayId } });
   } catch (error: any) {
     console.error('Create user failed:', error);
     if (error.code === 'auth/email-already-exists') return res.status(409).json({ error: 'This email is already registered.' });
-    if (error.code === 'super-admin-exists') return res.status(409).json({ error: error.message });
     if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to create account.' });
   }

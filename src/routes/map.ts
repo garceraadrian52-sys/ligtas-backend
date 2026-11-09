@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
+import { isMunicipalityAdmin } from '../services/roles';
 import { listReports } from '../services/reportReads';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
@@ -10,7 +11,7 @@ router.use(requireAuth, requireOfficial);
 // GET /map/monitoring
 router.get('/monitoring', async (req: AuthenticatedRequest, res) => {
   try {
-    const isLguAdmin = req.user!.role === 'LGU_ADMIN';
+    const isLguAdmin = isMunicipalityAdmin(req.user!.role);
     const barangayId = req.user!.barangayId;
 
     const roadsRef = db.collection('roadConditions');

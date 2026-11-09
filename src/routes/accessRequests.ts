@@ -46,8 +46,8 @@ router.post('/', async (req, res) => {
 
 // GET /access-requests — LGU_ADMIN lang, para makita ang mga pending requests
 router.get('/', requireAuth, requireOfficial, async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'LGU_ADMIN') {
-    return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can view access requests.' });
+  if (!['LGU_ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can view access requests.' });
   }
 
   try {
@@ -63,8 +63,8 @@ router.get('/', requireAuth, requireOfficial, async (req: AuthenticatedRequest, 
 
 // PATCH /access-requests/:id — approve/reject, LGU_ADMIN lang
 router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'LGU_ADMIN') {
-    return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can review access requests.' });
+  if (!['LGU_ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can review access requests.' });
   }
 
   const { status } = req.body ?? {};

@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
+import { isMunicipalityAdmin } from '../services/roles';
 import { summarizeDashboard } from '../services/dashboardSummary';
 import { buildBalagtasWaterTrend } from '../services/balagtasMonitoring';
 import { balagtasWeather } from '../services/balagtasWeather';
@@ -9,7 +10,7 @@ import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors
 const router = Router();
 router.use(requireAuth, requireOfficial);
 router.get('/', async (req: AuthenticatedRequest, res) => {
-  const isAdmin = req.user!.role === 'LGU_ADMIN';
+  const isAdmin = isMunicipalityAdmin(req.user!.role);
   const barangayId = req.user!.barangayId;
   if (!isAdmin && !barangayId) return res.status(403).json({ error: 'A barangay assignment is required.' });
   try {

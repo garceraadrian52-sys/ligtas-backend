@@ -36,8 +36,8 @@ router.get('/emergency-mode', requireAuth, requireOfficial, async (_req: Authent
 });
 
 router.patch('/emergency-mode', requireAuth, requireOfficial, async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'LGU_ADMIN') {
-    return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can change emergency mode.' });
+  if (!['LGU_ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can change emergency mode.' });
   }
   const { active } = req.body ?? {};
   try {

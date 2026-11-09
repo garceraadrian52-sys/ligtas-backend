@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
+import { isMunicipalityAdmin } from '../services/roles';
 
 import { validText } from '../services/inputValidation';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
@@ -12,7 +13,7 @@ router.use(requireAuth, requireOfficial);
 router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
     const centersRef = db.collection('evacuationCenters');
-    const query = req.user!.role === 'LGU_ADMIN'
+    const query = isMunicipalityAdmin(req.user!.role)
       ? centersRef
       : centersRef.where('barangayId', '==', req.user!.barangayId);
 
@@ -32,7 +33,7 @@ router.get('/:id/occupants', async (req: AuthenticatedRequest, res) => {
     const center = await db.doc(`evacuationCenters/${req.params.id}`).get();
     if (!center.exists) return res.status(404).json({ error: 'Evacuation center not found.' });
     const centerData = center.data()!;
-    if (req.user!.role !== 'LGU_ADMIN' && centerData.barangayId !== req.user!.barangayId) {
+    if (!isMunicipalityAdmin(req.user!.role) && centerData.barangayId !== req.user!.barangayId) {
       return res.status(403).json({ error: 'This center belongs to another barangay.' });
     }
     const records = await db.collection('evacuationRecords')
@@ -60,8 +61,8 @@ router.get('/:id/occupants', async (req: AuthenticatedRequest, res) => {
 
 // POST /evacuation-centers — LGU_ADMIN lang
 router.post('/', async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'LGU_ADMIN') {
-    return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can register evacuation centers.' });
+  if (!isMunicipalityAdmin(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can register evacuation centers.' });
   }
 
   const { name, barangayId, capacity, address, latitude, longitude, facilities, contactPerson, contactNumber, occupied = 0 } = req.body ?? {};

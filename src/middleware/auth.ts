@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
 import { isFirestoreResourceExhausted } from '../services/firestoreErrors';
+import { recordAuthenticatedActivity } from '../services/activityTracking';
+import { isMunicipalityAdmin } from '../services/roles';
 
 export interface AuthenticatedRequest extends Request {
   user?: { uid: string; role: string; barangayId: string | null; name: string; email: string };
@@ -29,6 +31,11 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       email: profile.email ?? decoded.email ?? '',
     };
     req.profile = profile;
+    if (['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'].includes(String(profile.role))) {
+      void recordAuthenticatedActivity(decoded.uid, decoded.auth_time).catch((activityError: any) => {
+        console.error('Record authenticated activity failed:', activityError?.code ?? 'unknown');
+      });
+    }
     next();
   } catch (error: any) {
     const invalidTokenCodes = ['auth/argument-error', 'auth/invalid-id-token', 'auth/id-token-expired', 'auth/id-token-revoked', 'auth/user-disabled', 'auth/user-not-found'];
@@ -40,8 +47,8 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
 }
 
 export function requireOfficial(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  if (!req.user || !['BARANGAY_OFFICIAL', 'LGU_ADMIN'].includes(req.user.role)) {
-    return res.status(403).json({ error: 'Only barangay officials or LGU admins can access this.' });
+  if (!req.user || (!isMunicipalityAdmin(req.user.role) && req.user.role !== 'BARANGAY_OFFICIAL')) {
+    return res.status(403).json({ error: 'This account cannot access administrative operations.' });
   }
   if (req.user.role === 'BARANGAY_OFFICIAL' && (typeof req.user.barangayId !== 'string' || !req.user.barangayId.trim())) {
     return res.status(403).json({ error: 'A barangay assignment is required. Contact your LGU administrator.' });

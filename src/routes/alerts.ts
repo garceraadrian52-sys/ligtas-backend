@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
+import { isMunicipalityAdmin } from '../services/roles';
 import { logAction } from '../services/auditLog';
 
 import { validDocumentId } from '../services/inputValidation';
@@ -68,8 +69,8 @@ router.get('/', async (_req: AuthenticatedRequest, res) => {
 
 // POST /alerts — LGU_ADMIN lang ang pwedeng gumawa/mag-publish
 router.post('/', async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'LGU_ADMIN') {
-    return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can create alerts.' });
+  if (!isMunicipalityAdmin(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can create alerts.' });
   }
 
   const { category, priority, title, message, barangayIds, publish } = req.body ?? {};
@@ -141,8 +142,8 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
 
 // PATCH /alerts/:id/publish — hiwalay na endpoint para mag-publish ng draft
 router.patch('/:id/publish', async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'LGU_ADMIN') {
-    return res.status(403).json({ error: 'Only LGU/MDRRMO personnel can publish alerts.' });
+  if (!isMunicipalityAdmin(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can publish alerts.' });
   }
 
   try {
