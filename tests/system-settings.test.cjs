@@ -71,6 +71,22 @@ test('system status is current, reports the worker runtime state and does not as
   assert.equal(result.data.lastUpdated, null);
 });
 
+test('system status omits malformed deployment timestamps and returns a valid ISO timestamp', async () => {
+  process.env.LIGTAS_LAST_UPDATED = 'not-a-date';
+  let response = await fetch(`${base}/system-status`, { headers: { 'x-role': 'SUPER_ADMIN' } });
+  let result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.data.lastUpdated, null);
+
+  process.env.LIGTAS_LAST_UPDATED = '2026-11-09T14:29:49.020Z';
+  response = await fetch(`${base}/system-status`, { headers: { 'x-role': 'SUPER_ADMIN' } });
+  result = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(result.data.lastUpdated, '2026-11-09T14:29:49.020Z');
+
+  delete process.env.LIGTAS_LAST_UPDATED;
+});
+
 test('partial backup is Super Admin only, bounded, redacts secrets and reports its unsupported restore scope', async () => {
   const denied = await fetch(`${base}/backup`, { method: 'POST', headers: { 'x-role': 'LGU_ADMIN' } });
   assert.equal(denied.status, 403);

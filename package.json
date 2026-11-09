@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "npm run build && node --test tests/*.test.cjs",
+    "cleanup:dry-run": "node scripts/cleanup-test-data.cjs --project=ligtas-d7a4c",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js"
