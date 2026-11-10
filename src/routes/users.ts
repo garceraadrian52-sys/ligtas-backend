@@ -7,7 +7,7 @@ import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors
 import { firebaseAuthPhotoUrl, isValidEmail, isValidProfilePhoto } from '../services/profileFields';
 import { allocateDisplayId } from '../services/recordDisplayIds';
 import { normalizeRole, SUPER_ADMIN_ROLE_VALUES } from '../services/roles';
-import { recordAuthenticatedActivity, shouldTrackAuthenticatedActivity } from '../services/activityTracking';
+import { recordAuthenticatedActivity, recordAuthenticatedLogin, shouldTrackAuthenticatedActivity } from '../services/activityTracking';
 
 const router = Router();
 const accountRoles = ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'] as const;
@@ -48,6 +48,22 @@ async function sendFirebasePasswordReset(email: string) {
 
 router.use(requireAuth);
 
+// POST /users/login — record an interactive login from the verified Firebase auth_time.
+// The request body is ignored; the server derives the UID and time from the ID token.
+router.post('/login', async (req: AuthenticatedRequest, res) => {
+  if (!shouldTrackAuthenticatedActivity(req.user!.role)) {
+    return res.status(403).json({ error: 'This account cannot record application activity.' });
+  }
+  try {
+    await recordAuthenticatedLogin(req.user!.uid, req.user!.authTime);
+    res.status(204).end();
+  } catch (error: any) {
+    console.error('Record authenticated login failed:', error?.code ?? 'unknown');
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    res.status(503).json({ error: 'Login could not be recorded. Please retry when connected.' });
+  }
+});
+
 // POST /users/activity — record authenticated use for the UID in the verified token.
 // The request body is intentionally ignored; clients cannot choose an account or timestamp.
 router.post('/activity', async (req: AuthenticatedRequest, res) => {
@@ -55,7 +71,7 @@ router.post('/activity', async (req: AuthenticatedRequest, res) => {
     return res.status(403).json({ error: 'This account cannot record application activity.' });
   }
   try {
-    await recordAuthenticatedActivity(req.user!.uid, req.user!.authTime);
+    await recordAuthenticatedActivity(req.user!.uid);
     res.status(204).end();
   } catch (error: any) {
     console.error('Record authenticated activity failed:', error?.code ?? 'unknown');

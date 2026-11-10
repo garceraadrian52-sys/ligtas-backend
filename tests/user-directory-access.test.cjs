@@ -34,7 +34,8 @@ require.cache[require.resolve('../dist/config/firebaseAdmin')] = { exports: { db
 const activityWrites = [];
 require.cache[require.resolve('../dist/services/activityTracking')] = {
   exports: {
-    async recordAuthenticatedActivity(uid, authTime) { activityWrites.push({ uid, authTime }); },
+    async recordAuthenticatedActivity(uid) { activityWrites.push({ kind: 'activity', uid }); },
+    async recordAuthenticatedLogin(uid, authTime) { activityWrites.push({ kind: 'login', uid, authTime }); },
     shouldTrackAuthenticatedActivity() { return true; },
   },
 };
@@ -112,13 +113,24 @@ test('Super Admin resident account changes stay outside the staff-management end
   assert.equal(deleteResponse.status, 403);
 });
 
-test('activity endpoint records only the authenticated UID and ignores client identity and timestamps', async () => {
+test('activity endpoint records only the authenticated UID and never writes a login timestamp', async () => {
   activityWrites.length = 0;
   const response = await fetch(`${base}/activity`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-role': 'RESIDENT' },
-    body: JSON.stringify({ uid: 'another-account', lastActiveAt: '1999-01-01T00:00:00Z' }),
+    body: JSON.stringify({ uid: 'another-account', lastActiveAt: '1999-01-01T00:00:00Z', lastLoginAt: '1999-01-01T00:00:00Z' }),
   });
   assert.equal(response.status, 204);
-  assert.deepEqual(activityWrites, [{ uid: 'verified-caller-uid', authTime: 1_800_000_000 }]);
+  assert.deepEqual(activityWrites, [{ kind: 'activity', uid: 'verified-caller-uid' }]);
+});
+
+test('login endpoint derives UID and auth_time from the verified request context', async () => {
+  activityWrites.length = 0;
+  const response = await fetch(`${base}/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-role': 'RESIDENT' },
+    body: JSON.stringify({ uid: 'another-account', auth_time: 1 }),
+  });
+  assert.equal(response.status, 204);
+  assert.deepEqual(activityWrites, [{ kind: 'login', uid: 'verified-caller-uid', authTime: 1_800_000_000 }]);
 });

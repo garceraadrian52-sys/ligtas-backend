@@ -21,7 +21,8 @@ require.cache[require.resolve('../dist/config/firebaseAdmin')] = {
 };
 require.cache[require.resolve('../dist/services/activityTracking')] = {
   exports: {
-    async recordAuthenticatedActivity(uid, authTime) { activityWrites.push({ uid, authTime }); },
+    async recordAuthenticatedActivity(uid) { activityWrites.push({ kind: 'activity', uid }); },
+    async recordAuthenticatedLogin(uid, authTime) { activityWrites.push({ kind: 'login', uid, authTime }); },
     shouldTrackAuthenticatedActivity(value) { return ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL', 'RESIDENT'].includes(value); },
   },
 };
@@ -43,38 +44,54 @@ before(async () => {
   server = await new Promise(resolve => {
     const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
   });
-  base = `http://127.0.0.1:${server.address().port}/users/activity`;
+  base = `http://127.0.0.1:${server.address().port}/users`;
 });
-
 after(() => {
   server.closeAllConnections();
   server.close();
 });
 
-test('the activity endpoint requires a verified Firebase token', async () => {
+test('activity and login endpoints require a verified Firebase token', async () => {
   activityWrites.length = 0;
-  const response = await fetch(base, { method: 'POST' });
-  assert.equal(response.status, 401);
+  const [activity, login] = await Promise.all([
+    fetch(`${base}/activity`, { method: 'POST' }),
+    fetch(`${base}/login`, { method: 'POST' }),
+  ]);
+  assert.equal(activity.status, 401);
+  assert.equal(login.status, 401);
   assert.equal(activityWrites.length, 0);
 });
 
-test('a resident can record their own activity but cannot select another UID or timestamp', async () => {
+test('resident activity uses the verified UID and writes no client-provided login value', async () => {
   activityWrites.length = 0;
   role = 'RESIDENT';
-  const response = await fetch(base, {
+  const response = await fetch(`${base}/activity`, {
     method: 'POST',
     headers: { Authorization: 'Bearer valid-id-token', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uid: 'other-user', lastActiveAt: '1999-01-01T00:00:00Z' }),
+    body: JSON.stringify({ uid: 'other-user', lastActiveAt: '1999-01-01T00:00:00Z', lastLoginAt: '1999-01-01T00:00:00Z' }),
   });
-
   assert.equal(response.status, 204);
-  assert.deepEqual(activityWrites, [{ uid: 'firebase-token-uid', authTime: 1_800_000_000 }]);
+  assert.deepEqual(activityWrites, [{ kind: 'activity', uid: 'firebase-token-uid' }]);
 });
 
-test('official roles use the same authenticated activity endpoint', async () => {
+test('resident interactive login uses only the verified UID and auth_time', async () => {
   activityWrites.length = 0;
-  role = 'BARANGAY_OFFICIAL';
-  const response = await fetch(base, { method: 'POST', headers: { Authorization: 'Bearer valid-id-token' } });
+  role = 'RESIDENT';
+  const response = await fetch(`${base}/login`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer valid-id-token', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid: 'other-user', auth_time: 1, lastLoginAt: '1999-01-01T00:00:00Z' }),
+  });
   assert.equal(response.status, 204);
-  assert.deepEqual(activityWrites, [{ uid: 'firebase-token-uid', authTime: 1_800_000_000 }]);
+  assert.deepEqual(activityWrites, [{ kind: 'login', uid: 'firebase-token-uid', authTime: 1_800_000_000 }]);
+});
+
+test('administrator and Barangay Official roles use the authenticated login route', async () => {
+  for (const accountRole of ['LGU_ADMIN', 'SUPER_ADMIN', 'BARANGAY_OFFICIAL']) {
+    activityWrites.length = 0;
+    role = accountRole;
+    const response = await fetch(`${base}/login`, { method: 'POST', headers: { Authorization: 'Bearer valid-id-token' } });
+    assert.equal(response.status, 204, accountRole);
+    assert.deepEqual(activityWrites, [{ kind: 'login', uid: 'firebase-token-uid', authTime: 1_800_000_000 }], accountRole);
+  }
 });

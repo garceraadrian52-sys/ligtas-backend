@@ -16,6 +16,7 @@ require.cache[require.resolve('../dist/config/firebaseAdmin')] = { exports: { au
 require.cache[require.resolve('../dist/services/activityTracking')] = {
   exports: {
     recordAuthenticatedActivity: async () => undefined,
+    recordAuthenticatedLogin: async () => undefined,
     shouldTrackAuthenticatedActivity: role => ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL', 'RESIDENT'].includes(role),
   },
 };

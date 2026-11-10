@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { normalizeRole } from '../services/roles';
-import { recordAuthenticatedActivity } from '../services/activityTracking';
+import { recordAuthenticatedLogin } from '../services/activityTracking';
 
 const router = Router();
 const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY;
@@ -96,10 +96,10 @@ router.post('/login', async (req, res) => {
 
     try {
       const verifiedToken = await auth.verifyIdToken(signInData.idToken);
-      if (verifiedToken.uid === uid) await recordAuthenticatedActivity(uid, verifiedToken.auth_time);
+      if (verifiedToken.uid === uid) await recordAuthenticatedLogin(uid, verifiedToken.auth_time);
     } catch (activityError: any) {
       // Keep a valid sign-in available if activity logging is temporarily unavailable.
-      console.error('Record web login activity failed:', activityError?.code ?? 'unknown');
+      console.error('Record web login failed:', activityError?.code ?? 'unknown');
     }
 
     return res.json({

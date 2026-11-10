@@ -25,7 +25,7 @@ require.cache[require.resolve('../dist/config/firebaseAdmin')] = {
 };
 require.cache[require.resolve('../dist/services/activityTracking')] = {
   exports: {
-    async recordAuthenticatedActivity(uid, authTime) { activityWrites.push({ uid, authTime }); },
+    async recordAuthenticatedLogin(uid, authTime) { activityWrites.push({ uid, authTime }); },
   },
 };
 require.cache[require.resolve('../dist/services/firestoreErrors')] = {
@@ -55,7 +55,7 @@ after(() => {
   else process.env.FIREBASE_WEB_API_KEY = previousApiKey;
 });
 
-test('only a successful authorized interactive login records trusted login and activity time', async () => {
+test('only a successful authorized interactive login records trusted login time', async () => {
   activityWrites.length = 0;
   credentialsValid = true;
   const response = await httpFetch(base, {
