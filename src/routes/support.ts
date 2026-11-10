@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
+import { isMunicipalityAdmin } from '../services/roles';
 
 const router = Router();
 router.get('/support', requireAuth, requireOfficial, async (_req: AuthenticatedRequest, res) => {
@@ -26,8 +27,9 @@ router.get('/support', requireAuth, requireOfficial, async (_req: AuthenticatedR
 router.get('/emergency-mode', requireAuth, requireOfficial, async (_req: AuthenticatedRequest, res) => {
   try {
     const snapshot = await db.doc('systemSettings/emergencyMode').get();
-    const data = snapshot.exists ? snapshot.data() : { active: false };
-    res.json({ data });
+    const data = snapshot.exists ? snapshot.data() ?? {} : {};
+    const revision = Number.isSafeInteger(data.revision) && data.revision >= 0 ? data.revision : 0;
+    res.json({ data: { ...data, active: data.active === true, revision } });
   } catch (error) {
     console.error('Get emergency mode failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;
@@ -36,19 +38,47 @@ router.get('/emergency-mode', requireAuth, requireOfficial, async (_req: Authent
 });
 
 router.patch('/emergency-mode', requireAuth, requireOfficial, async (req: AuthenticatedRequest, res) => {
-  if (!['LGU_ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+  if (!isMunicipalityAdmin(req.user!.role)) {
     return res.status(403).json({ error: 'Only municipality administrators can change emergency mode.' });
   }
-  const { active } = req.body ?? {};
+  const { active, expectedRevision } = req.body ?? {};
+  if (typeof active !== 'boolean') {
+    return res.status(400).json({ error: 'The emergency mode state must be a boolean.' });
+  }
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    return res.status(400).json({ error: 'Refresh emergency mode before changing it.' });
+  }
+
+  const modeRef = db.doc('systemSettings/emergencyMode');
   try {
-    await db.doc('systemSettings/emergencyMode').set({
-      active: Boolean(active),
-      changedBy: req.user!.uid,
-      changedAt: new Date(),
-    }, { merge: true });
-    const updated = await db.doc('systemSettings/emergencyMode').get();
-    res.json({ data: updated.data() });
+    const data = await db.runTransaction(async (transaction) => {
+      const snapshot = await transaction.get(modeRef);
+      const current = snapshot.exists ? snapshot.data() ?? {} : {};
+      const revision = Number.isSafeInteger(current.revision) && current.revision >= 0 ? current.revision : 0;
+      const currentState = { ...current, active: current.active === true, revision };
+
+      if (revision !== expectedRevision) {
+        const conflict = new Error('Emergency mode changed elsewhere. Refresh and try again.');
+        Object.assign(conflict, { name: 'EmergencyModeRevisionConflict', current: currentState });
+        throw conflict;
+      }
+
+      if (currentState.active === active) return currentState;
+
+      const updated = {
+        active,
+        revision: revision + 1,
+        changedBy: req.user!.uid,
+        changedAt: new Date(),
+      };
+      transaction.set(modeRef, updated, { merge: true });
+      return { ...currentState, ...updated };
+    });
+    res.json({ data });
   } catch (error) {
+    if (error instanceof Error && error.name === 'EmergencyModeRevisionConflict') {
+      return res.status(409).json({ error: error.message, data: (error as Error & { current: unknown }).current });
+    }
     console.error('Update emergency mode failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to update emergency mode.' });
