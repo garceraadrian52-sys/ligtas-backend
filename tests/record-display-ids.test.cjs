@@ -52,3 +52,11 @@ test('display IDs keep growing after four digits and assignment is idempotent', 
   assert.equal(await assignDisplayIdIfMissing(db, 'reports', ref), 'RPT10001');
   assert.equal(documents.get(ref.path).displayId, 'RPT10001');
 });
+
+test('new user account IDs use the ACC prefix, five minimum digits, and preserve the existing counter', async () => {
+  const { db, documents } = memoryFirestore();
+  assert.equal(await db.runTransaction(transaction => allocateDisplayId(transaction, db, 'users')), 'ACC-00001');
+  documents.set('recordIdCounters/users', { lastIssued: 99999, prefix: 'USR' });
+  assert.equal(await db.runTransaction(transaction => allocateDisplayId(transaction, db, 'users')), 'ACC-100000');
+  assert.equal(documents.get('recordIdCounters/users').lastIssued, 100000);
+});

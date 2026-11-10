@@ -6,6 +6,7 @@
   "scripts": {
     "test": "npm run build && node --test tests/*.test.cjs",
     "cleanup:dry-run": "node scripts/cleanup-test-data.cjs --project=ligtas-d7a4c",
+    "backfill:user-account-ids": "npm run build && node scripts/backfill-user-account-ids.cjs",
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js"

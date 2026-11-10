@@ -24,6 +24,26 @@ const snapshotFor = reference => {
 };
 
 const makeReference = path => ({ path, id: path.slice(path.lastIndexOf('/') + 1), async get() { return snapshotFor(this); } });
+const queryRows = (name, filters, maximum) => [...rows.entries()]
+  .filter(([path, value]) => path.startsWith(`${name}/`) && filters.every(([field, expected]) => value[field] === expected))
+  .slice(0, maximum ?? Infinity)
+  .map(([path, value]) => ({ id: path.slice(path.lastIndexOf('/') + 1), exists: true, data: () => ({ ...value }) }));
+const makeQuery = (name, filters = [], maximum) => ({
+  query: true,
+  name,
+  filters,
+  maximum,
+  where(field, operator, expected) {
+    if (operator !== '==') throw new Error(`Unsupported fake query operator: ${operator}`);
+    return makeQuery(name, [...filters, [field, expected]], maximum);
+  },
+  limit(value) { return makeQuery(name, filters, value); },
+  orderBy() { return makeQuery(name, filters, maximum); },
+  async get() {
+    const docs = queryRows(name, filters, maximum);
+    return { docs, empty: docs.length === 0, size: docs.length };
+  },
+});
 
 const db = {
   doc: makeReference,
@@ -33,6 +53,9 @@ const db = {
         const documentId = id || `audit-${++nextAuditId}`;
         return makeReference(`${name}/${documentId}`);
       },
+      where(field, operator, value) { return makeQuery(name).where(field, operator, value); },
+      orderBy(field, direction) { return makeQuery(name).orderBy(field, direction); },
+      async get() { return makeQuery(name).get(); },
     };
   },
   runTransaction(callback) {
@@ -43,7 +66,7 @@ const db = {
       if (beforeTransaction) await beforeTransaction();
       const writes = [];
       const transaction = {
-        async get(reference) { return snapshotFor(reference); },
+        async get(reference) { return reference.query ? reference.get() : snapshotFor(reference); },
         create(reference, value) {
           if (failAuditCreate && reference.path.startsWith('auditLogs/')) throw new Error('simulated audit write failure');
           writes.push({ kind: 'create', reference, value });
@@ -107,7 +130,7 @@ require.cache[require.resolve('../dist/services/firestoreErrors')] = {
   exports: { respondToFirestoreResourceExhausted() { return false; } },
 };
 require.cache[require.resolve('../dist/services/recordDisplayIds')] = {
-  exports: { async allocateDisplayId(_transaction, _db, collection) { return `${collection === 'users' ? 'USR' : 'ACR'}${String(++nextDisplayId).padStart(4, '0')}`; } },
+  exports: { async allocateDisplayId(_transaction, _db, collection) { return `${collection === 'users' ? 'ACC-' : 'ACR'}${String(++nextDisplayId).padStart(collection === 'users' ? 5 : 4, '0')}`; } },
 };
 require.cache[require.resolve('../dist/services/accessRequestEmail')] = {
   exports: {
@@ -197,6 +220,19 @@ function addPendingRequest(id = 'request-001', overrides = {}) {
   return id;
 }
 
+const validAccessRequest = () => ({
+  fullName: 'New Applicant', email: 'new.applicant@example.test', phone: '09170000000',
+  position: 'MDRRMO Personnel', barangay: 'Borol 1st', barangayId: 'barangay_borol_1st',
+  role: 'Barangay Official', reason: 'Support municipal emergency coordination.',
+});
+
+async function submitAccessRequest(values = {}) {
+  return fetch(`${base}/access-requests`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...validAccessRequest(), ...values }),
+  });
+}
+
 async function reject(id, body = { status: 'Rejected', rejectionReason: 'The submitted details could not be verified.' }) {
   return fetch(`${base}/access-requests/${encodeURIComponent(id)}`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -260,6 +296,42 @@ test('duplicate email is reported without creating a Firestore profile or changi
   assert.equal((await response.json()).error, 'This email is already registered.');
   assert.equal(rows.has('users/existing-auth-user'), false);
   assert.equal(rows.get('accessRequests/request-001').status, 'Pending');
+});
+
+test('public access request options are loaded from configured role and barangay sources', async () => {
+  rows.set('barangays/wawa', { name: 'Wawa' });
+  rows.set('barangays/borol_1st', { name: 'Borol 1st' });
+  const response = await fetch(`${base}/access-requests/options`);
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(payload.data.roles.map(item => item.value), ['Barangay Official', 'LGU Staff']);
+  assert.deepEqual(payload.data.barangays.map(item => item.id), ['borol_1st', 'wawa']);
+});
+
+test('valid access request submission stores the canonical barangay and a pending request', async () => {
+  rows.set('barangays/barangay_borol_1st', { name: 'Borol 1st' });
+  const response = await submitAccessRequest();
+  const payload = await response.json();
+  assert.equal(response.status, 201);
+  assert.equal(payload.data.status, 'Pending');
+  assert.equal(rows.get(`accessRequests/${payload.data.id}`).barangay, 'Borol 1st');
+  assert.equal(rows.get(`accessRequests/${payload.data.id}`).barangayId, 'barangay_borol_1st');
+});
+
+test('invalid access request fields and unregistered barangays are rejected', async () => {
+  assert.equal((await submitAccessRequest({ reason: '   ' })).status, 400);
+  assert.equal((await submitAccessRequest({ role: 'Super Admin' })).status, 400);
+  assert.equal((await submitAccessRequest({ barangayId: 'missing', barangay: 'Not a Barangay' })).status, 400);
+  assert.equal([...rows.keys()].some(path => path.startsWith('accessRequests/')), false);
+});
+
+test('a repeated pending request for the same email is rejected atomically', async () => {
+  rows.set('barangays/barangay_borol_1st', { name: 'Borol 1st' });
+  const first = await submitAccessRequest();
+  const second = await submitAccessRequest({ fullName: 'Different spelling', email: ' NEW.APPLICANT@example.test ' });
+  assert.equal(first.status, 201);
+  assert.equal(second.status, 409);
+  assert.equal([...rows.keys()].filter(path => path.startsWith('accessRequests/')).length, 1);
 });
 
 test('registration cannot associate a different email with an access request', async () => {

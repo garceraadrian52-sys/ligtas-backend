@@ -4,7 +4,7 @@ export const displayIdPrefixes = {
   reports: 'RPT',
   evacuationCenters: 'EVC',
   alerts: 'ALT',
-  users: 'USR',
+  users: 'ACC-',
   accessRequests: 'ACR',
 } as const;
 
@@ -19,8 +19,9 @@ export async function allocateDisplayId(transaction: Transaction, db: Firestore,
   if (lastIssued >= Number.MAX_SAFE_INTEGER) throw new Error(`The ${module} display ID counter is exhausted.`);
 
   const next = lastIssued + 1;
-  transaction.set(counterRef, { prefix, lastIssued: next, updatedAt: new Date() });
-  return `${prefix}${String(next).padStart(4, '0')}`;
+  transaction.set(counterRef, { prefix, lastIssued: next, updatedAt: new Date() }, { merge: true });
+  const minimumDigits = module === 'users' ? 5 : 4;
+  return `${prefix}${String(next).padStart(minimumDigits, '0')}`;
 }
 
 export async function assignDisplayIdIfMissing(db: Firestore, module: DisplayIdModule, recordRef: DocumentReference) {

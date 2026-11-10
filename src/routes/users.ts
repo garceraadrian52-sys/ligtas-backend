@@ -33,6 +33,18 @@ function errorCode(error: unknown): string | undefined {
   return typeof error.code === 'string' ? error.code : undefined;
 }
 
+function readableAccountId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const id = value.trim();
+  if (!/^ACC-\d{5,}$/.test(id)) return null;
+  const sequence = Number(id.slice('ACC-'.length));
+  return Number.isSafeInteger(sequence) && sequence > 0 ? id : null;
+}
+
+function accountIdSequence(value: string): number {
+  return Number(value.slice('ACC-'.length));
+}
+
 async function removeCreatedAuthAccount(uid: string) {
   try {
     await auth.deleteUser(uid);
@@ -101,6 +113,67 @@ router.post('/activity', async (req: AuthenticatedRequest, res) => {
   }
 });
 
+// POST /users/account-id — assign a readable ID to the signed-in profile when needed.
+// The UID is always taken from the verified Firebase token, never from the request body.
+router.post('/account-id', async (req: AuthenticatedRequest, res) => {
+  const uid = req.user!.uid;
+  const userRef = db.doc(`users/${uid}`);
+  try {
+    const result = await db.runTransaction(async transaction => {
+      const profileSnapshot = await transaction.get(userRef);
+      if (!profileSnapshot.exists) return { state: 'missing' as const };
+      const profile = profileSnapshot.data() ?? {};
+      if (!directoryRole(profile.role)) return { state: 'forbidden' as const };
+
+      const existing = readableAccountId(profile.accountId);
+      if (existing) return { state: 'assigned' as const, accountId: existing };
+      if (typeof profile.accountId === 'string' && profile.accountId.trim()) return { state: 'manual-review' as const };
+
+      const legacyId = readableAccountId(profile.displayId);
+      if (legacyId) {
+        const [accountIdOwners, displayIdOwners] = await Promise.all([
+          transaction.get(db.collection('users').where('accountId', '==', legacyId)),
+          transaction.get(db.collection('users').where('displayId', '==', legacyId)),
+        ]);
+        const collides = [...accountIdOwners.docs, ...displayIdOwners.docs].some(owner => {
+          if (owner.id === uid) return false;
+          const ownerData = owner.data();
+          const ownerAccountId = readableAccountId(ownerData.accountId);
+          return ownerAccountId === legacyId || (!ownerAccountId && readableAccountId(ownerData.displayId) === legacyId);
+        });
+        if (!collides) {
+          const counterRef = db.doc('recordIdCounters/users');
+          const counterSnapshot = await transaction.get(counterRef);
+          const savedCounter = counterSnapshot.exists ? counterSnapshot.data()?.lastIssued : 0;
+          const lastIssued = typeof savedCounter === 'number' && Number.isSafeInteger(savedCounter) && savedCounter >= 0 ? savedCounter : 0;
+          transaction.update(userRef, { accountId: legacyId, updatedAt: new Date() });
+          if (accountIdSequence(legacyId) > lastIssued) {
+            transaction.set(counterRef, { prefix: 'ACC-', lastIssued: accountIdSequence(legacyId), updatedAt: new Date() }, { merge: true });
+          }
+          return { state: 'assigned' as const, accountId: legacyId };
+        }
+      }
+
+      const accountId = await allocateDisplayId(transaction, db, 'users');
+      transaction.update(userRef, {
+        accountId,
+        ...(!profile.displayId ? { displayId: accountId } : {}),
+        updatedAt: new Date(),
+      });
+      return { state: 'assigned' as const, accountId };
+    });
+
+    if (result.state === 'missing') return res.status(404).json({ error: 'Account profile not found.' });
+    if (result.state === 'forbidden') return res.status(403).json({ error: 'This account cannot receive a directory ID.' });
+    if (result.state === 'manual-review') return res.status(409).json({ error: 'This account has an unrecognized ID that requires administrator review.' });
+    return res.json({ data: { accountId: result.accountId } });
+  } catch (error) {
+    console.error('Assign account ID failed:', errorCode(error) ?? 'unknown');
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    return res.status(503).json({ error: 'Account ID is temporarily unavailable.' });
+  }
+});
+
 // GET /users/access — role-aware capabilities for the web account directory.
 router.get('/access', async (req: AuthenticatedRequest, res) => {
   if (!['SUPER_ADMIN', 'LGU_ADMIN'].includes(req.user!.role)) {
@@ -130,9 +203,11 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
         const item = doc.data();
         const role = directoryRole(item.role);
         if (!role) return null;
+        const accountId = readableAccountId(item.accountId) ?? readableAccountId(item.displayId);
         return {
           id: doc.id,
-          displayId: item.displayId ?? null,
+          accountId,
+          displayId: accountId,
           name: item.name ?? item.displayName ?? '',
           displayName: item.displayName ?? item.name ?? '',
           email: item.email ?? item.emailAddress ?? '',
@@ -216,7 +291,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
           if (String(request.email || '').trim().toLowerCase() !== email.trim().toLowerCase()) throw Object.assign(new Error('The registered email must match the access request.'), { code: 'access-request/email-mismatch' });
         }
         const nextDisplayId = await allocateDisplayId(transaction, db, 'users');
-        transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, displayId: nextDisplayId });
+        transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, accountId: nextDisplayId, displayId: nextDisplayId });
         if (accessRequestRef) {
           const reviewedAt = new Date();
           transaction.update(accessRequestRef, {
@@ -259,7 +334,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       await removeCreatedAuthAccount(userRecord.uid);
       throw auditError;
     }
-    res.status(201).json({ data: { id: userRecord.uid, ...profile, displayId } });
+    res.status(201).json({ data: { id: userRecord.uid, ...profile, accountId: displayId, displayId } });
   } catch (error: any) {
     console.error('Create user failed:', error);
     if (error.code === 'auth/email-already-exists') return res.status(409).json({ error: 'This email is already registered.' });

@@ -15,12 +15,14 @@ const account = {
   privateToken: 'must-not-leak',
 };
 const residentAccount = { name: 'Resident Example', email: 'resident@example.com', role: 'RESIDENT', phone: '555-0000', barangayId: 'barangay_longos', displayId: 'USR0012', disabled: false, lastActiveAt: new Date('2026-11-09T03:00:00.000Z'), lastLoginAt: new Date('2026-11-08T19:00:00.000Z'), householdId: 'private-household', password: 'must-not-leak', pushToken: 'must-not-leak' };
+const migratedResident = { name: 'Migrated Resident', email: 'migrated@example.com', role: 'RESIDENT', accountId: 'ACC-00012', displayId: 'ACC-00012' };
 const db = {
   collection(name) {
     assert.equal(name, 'users');
     return { async get() { return { docs: [
       { id: 'official-uid', data: () => ({ ...account }) },
       { id: 'resident-uid', data: () => ({ ...residentAccount }) },
+      { id: 'migrated-resident-uid', data: () => ({ ...migratedResident }) },
       { id: 'unknown-uid', data: () => ({ name: 'Unknown role', role: 'unknown-role' }) },
     ] }; } };
   },
@@ -82,7 +84,11 @@ test('LGU Admin can view user access capabilities and receives a safe read-only 
   assert.equal('privateToken' in list.data[0], false);
   const resident = list.data.find(user => user.id === 'resident-uid');
   assert.equal(resident.role, 'RESIDENT');
-  assert.equal(resident.displayId, 'USR0012');
+  assert.equal(resident.accountId, null);
+  assert.equal(resident.displayId, null);
+  const migrated = list.data.find(user => user.id === 'migrated-resident-uid');
+  assert.equal(migrated.accountId, 'ACC-00012');
+  assert.equal(migrated.displayId, 'ACC-00012');
   assert.equal(resident.barangayId, 'barangay_longos');
   assert.equal(resident.lastActiveAt, '2026-11-09T03:00:00.000Z');
   assert.equal(resident.lastLoginAt, '2026-11-08T19:00:00.000Z');
