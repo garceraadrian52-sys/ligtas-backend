@@ -20,6 +20,13 @@ function directoryRole(value: unknown): AccountRole | 'RESIDENT' | null {
   return accountRoles.includes(role as AccountRole) ? role as AccountRole : null;
 }
 
+function accessRequestAccountRole(value: unknown): AccountRole | null {
+  const role = String(value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (role === 'barangay_official') return 'BARANGAY_OFFICIAL';
+  if (['lgu_staff', 'lgu_admin'].includes(role)) return 'LGU_ADMIN';
+  return null;
+}
+
 async function writeAudit(req: AuthenticatedRequest, action: string, targetId: string, details: Record<string, unknown>) {
   await logAction({
     actorId: req.user!.uid,
@@ -116,6 +123,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
           displayName: item.displayName ?? item.name ?? '',
           email: item.email ?? item.emailAddress ?? '',
           phone: item.phone ?? item.phoneNumber ?? '',
+          position: item.position ?? '',
           ...(role !== 'RESIDENT' ? { photoURL: item.photoURL ?? item.photoUrl ?? null } : {}),
           role,
           barangayId: item.barangayId ?? (role === 'RESIDENT' ? item.barangay ?? null : null),
@@ -137,11 +145,13 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
 // POST /users — only Super Admin can create operational accounts.
 router.post('/', async (req: AuthenticatedRequest, res) => {
   if (req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Only Super Admin can create accounts.' });
-  const { email, name, phone, photoURL, role, barangayId, password, disabled } = req.body ?? {};
+  const { email, name, phone, position, photoURL, role, barangayId, password, disabled, accessRequestId } = req.body ?? {};
   if (!isValidEmail(email) || !validText(name, 200) || !validText(password, 4096)) {
     return res.status(400).json({ error: 'Enter a valid email, full name, and initial password.' });
   }
   if (phone !== undefined && (typeof phone !== 'string' || phone.length > 40)) return res.status(400).json({ error: 'Enter a valid phone number.' });
+  if (position !== undefined && (typeof position !== 'string' || position.length > 120)) return res.status(400).json({ error: 'Enter a valid position.' });
+  if (accessRequestId !== undefined && !validDocumentId(accessRequestId)) return res.status(400).json({ error: 'Access request reference is invalid.' });
   if (photoURL !== undefined && !isValidProfilePhoto(photoURL)) return res.status(400).json({ error: 'Choose a valid profile image.' });
   if (!accountRoles.includes(role)) return res.status(400).json({ error: 'Choose Super Admin, LGU Admin, or Barangay Official.' });
   if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters.' });
@@ -153,6 +163,15 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       return res.status(400).json({ error: 'Barangay does not exist.' });
     }
 
+    const accessRequestRef = accessRequestId ? db.doc(`accessRequests/${accessRequestId}`) : null;
+    if (accessRequestRef) {
+      const accessRequestSnapshot = await accessRequestRef.get();
+      if (!accessRequestSnapshot.exists) return res.status(404).json({ error: 'Access request not found.' });
+      const accessRequest = accessRequestSnapshot.data()!;
+      if (String(accessRequest.status || '').toLowerCase() !== 'pending') return res.status(409).json({ error: 'This access request is no longer pending.' });
+      if (accessRequestAccountRole(accessRequest.role) !== role) return res.status(400).json({ error: 'The selected account role does not match the access request.' });
+    }
+
     const hostedPhotoURL = firebaseAuthPhotoUrl(photoURL);
     const userRecord = await auth.createUser({ email: email.trim().toLowerCase(), password, displayName: name.trim(), disabled: disabled === true, ...(hostedPhotoURL ? { photoURL: hostedPhotoURL } : {}) });
     const profile = {
@@ -162,6 +181,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       role: role as AccountRole,
       barangayId: role === 'BARANGAY_OFFICIAL' ? barangayId : null,
       phone: typeof phone === 'string' ? phone.trim() : '',
+      position: typeof position === 'string' ? position.trim() : '',
       ...(photoURL !== undefined ? { photoURL } : {}),
       householdId: null,
       disabled: disabled === true,
@@ -172,8 +192,27 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     let displayId: string;
     try {
       displayId = await db.runTransaction(async transaction => {
+        if (accessRequestRef) {
+          const requestSnapshot = await transaction.get(accessRequestRef);
+          if (!requestSnapshot.exists) throw Object.assign(new Error('Access request not found.'), { code: 'access-request/not-found' });
+          const request = requestSnapshot.data()!;
+          if (String(request.status || '').toLowerCase() !== 'pending') throw Object.assign(new Error('This access request is no longer pending.'), { code: 'access-request/not-pending' });
+          if (accessRequestAccountRole(request.role) !== role) throw Object.assign(new Error('The selected account role does not match the access request.'), { code: 'access-request/role-mismatch' });
+        }
         const nextDisplayId = await allocateDisplayId(transaction, db, 'users');
         transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, displayId: nextDisplayId });
+        if (accessRequestRef) {
+          const reviewedAt = new Date();
+          transaction.update(accessRequestRef, {
+            status: 'Approved',
+            registeredUserId: userRecord.uid,
+            registeredAt: reviewedAt,
+            reviewedBy: req.user!.uid,
+            reviewedByName: req.user!.name,
+            reviewedAt,
+            updatedAt: reviewedAt,
+          });
+        }
         return nextDisplayId;
       });
     } catch (profileError) {
@@ -182,9 +221,12 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     }
 
     try {
-      await writeAudit(req, 'user_created', userRecord.uid, { email: profile.email, role, barangayId: profile.barangayId });
+      await writeAudit(req, 'user_created', userRecord.uid, { email: profile.email, role, barangayId: profile.barangayId, ...(accessRequestId ? { accessRequestId } : {}) });
     } catch (auditError) {
       await db.doc(`users/${userRecord.uid}`).delete().catch(() => {});
+      if (accessRequestRef) {
+        await accessRequestRef.update({ status: 'Pending', registeredUserId: null, registeredAt: null, reviewedBy: null, reviewedByName: null, reviewedAt: null, updatedAt: new Date() }).catch(() => {});
+      }
       await auth.deleteUser(userRecord.uid).catch(() => {});
       throw auditError;
     }
@@ -192,6 +234,9 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   } catch (error: any) {
     console.error('Create user failed:', error);
     if (error.code === 'auth/email-already-exists') return res.status(409).json({ error: 'This email is already registered.' });
+    if (error.code === 'access-request/not-found') return res.status(404).json({ error: 'Access request not found.' });
+    if (error.code === 'access-request/not-pending') return res.status(409).json({ error: 'This access request is no longer pending.' });
+    if (error.code === 'access-request/role-mismatch') return res.status(400).json({ error: 'The selected account role does not match the access request.' });
     if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to create account.' });
   }

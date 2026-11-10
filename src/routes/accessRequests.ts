@@ -4,6 +4,8 @@ import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../midd
 import { logAction } from '../services/auditLog';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { allocateDisplayId } from '../services/recordDisplayIds';
+import { sendAccessRequestRejectionEmail } from '../services/accessRequestEmail';
+import { isValidEmail } from '../services/profileFields';
 
 const router = Router();
 
@@ -11,7 +13,7 @@ const router = Router();
 router.post('/', async (req, res) => {
   const { fullName, email, phone, position, barangay, role, reason } = req.body ?? {};
 
-  if (!fullName || !email || !phone || !position || !barangay || !role || !reason) {
+  if (!fullName || !isValidEmail(email) || !phone || !position || !barangay || !role || !reason) {
     return res.status(400).json({ error: 'All fields are required.' });
   }
 
@@ -71,14 +73,40 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
   if (!['Approved', 'Rejected'].includes(status)) {
     return res.status(400).json({ error: 'status must be Approved or Rejected.' });
   }
+  const rejectionReason = typeof req.body?.rejectionReason === 'string' ? req.body.rejectionReason.trim() : '';
+  if (status === 'Rejected' && (!rejectionReason || rejectionReason.length > 1500)) {
+    return res.status(400).json({ error: 'Enter a rejection reason up to 1500 characters.' });
+  }
 
   try {
     const ref = db.doc(`accessRequests/${req.params.id}`);
     const snapshot = await ref.get();
     if (!snapshot.exists) return res.status(404).json({ error: 'Access request not found.' });
+    const request = snapshot.data()!;
+
+    if (status === 'Rejected') {
+      if (String(request.status || '').toLowerCase() !== 'pending') {
+        return res.status(409).json({ error: 'This access request is no longer pending.' });
+      }
+      if (!isValidEmail(request.email)) return res.status(400).json({ error: 'The access request does not have a valid email address.' });
+      try {
+        await sendAccessRequestRejectionEmail({
+          email: String(request.email).trim().toLowerCase(),
+          fullName: String(request.fullName || ''),
+          role: String(request.role || ''),
+          reason: rejectionReason,
+        });
+      } catch (emailError: any) {
+        console.error('Send access request rejection email failed:', emailError?.code ?? 'unknown');
+        return res.status(503).json({ error: emailError?.code === 'ACCESS_REQUEST_EMAIL_NOT_CONFIGURED'
+          ? 'Rejection email is not configured. The request is still pending. Configure SMTP in the backend environment and retry.'
+          : 'Could not send the rejection email. The request is still pending. Please retry.' });
+      }
+    }
 
     await ref.update({
       status,
+      ...(status === 'Rejected' ? { rejectionReason } : {}),
       reviewedBy: req.user!.uid,
       reviewedByName: req.user!.name,
       reviewedAt: new Date(),
@@ -93,7 +121,7 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
       action: `access_request_${status.toLowerCase()}`,
       targetType: 'accessRequest',
       targetId: String(req.params.id),
-      details: { email: snapshot.data()?.email },
+      details: { email: request.email, ...(status === 'Rejected' ? { rejectionReason } : {}) },
     });
 
     const updated = await ref.get();
