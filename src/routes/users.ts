@@ -2,7 +2,8 @@ import { Router, type Response } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { validText, validDocumentId } from '../services/inputValidation';
-import { logAction } from '../services/auditLog';
+import { logAction, logActionInTransaction } from '../services/auditLog';
+import { invalidateFirestoreReadCache } from '../services/firestoreReadCache';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { firebaseAuthPhotoUrl, isValidEmail, isValidProfilePhoto } from '../services/profileFields';
 import { allocateDisplayId } from '../services/recordDisplayIds';
@@ -25,6 +26,19 @@ function accessRequestAccountRole(value: unknown): AccountRole | null {
   if (role === 'barangay_official') return 'BARANGAY_OFFICIAL';
   if (['lgu_staff', 'lgu_admin'].includes(role)) return 'LGU_ADMIN';
   return null;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
+  return typeof error.code === 'string' ? error.code : undefined;
+}
+
+async function removeCreatedAuthAccount(uid: string) {
+  try {
+    await auth.deleteUser(uid);
+  } catch (error: unknown) {
+    console.error('Could not remove Firebase Auth account after user creation failed:', errorCode(error) ?? 'unknown');
+  }
 }
 
 async function writeAudit(req: AuthenticatedRequest, action: string, targetId: string, details: Record<string, unknown>) {
@@ -170,6 +184,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       const accessRequest = accessRequestSnapshot.data()!;
       if (String(accessRequest.status || '').toLowerCase() !== 'pending') return res.status(409).json({ error: 'This access request is no longer pending.' });
       if (accessRequestAccountRole(accessRequest.role) !== role) return res.status(400).json({ error: 'The selected account role does not match the access request.' });
+      if (String(accessRequest.email || '').trim().toLowerCase() !== email.trim().toLowerCase()) return res.status(400).json({ error: 'The registered email must match the access request.' });
     }
 
     const hostedPhotoURL = firebaseAuthPhotoUrl(photoURL);
@@ -198,6 +213,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
           const request = requestSnapshot.data()!;
           if (String(request.status || '').toLowerCase() !== 'pending') throw Object.assign(new Error('This access request is no longer pending.'), { code: 'access-request/not-pending' });
           if (accessRequestAccountRole(request.role) !== role) throw Object.assign(new Error('The selected account role does not match the access request.'), { code: 'access-request/role-mismatch' });
+          if (String(request.email || '').trim().toLowerCase() !== email.trim().toLowerCase()) throw Object.assign(new Error('The registered email must match the access request.'), { code: 'access-request/email-mismatch' });
         }
         const nextDisplayId = await allocateDisplayId(transaction, db, 'users');
         transaction.create(db.doc(`users/${userRecord.uid}`), { ...profile, displayId: nextDisplayId });
@@ -212,22 +228,35 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
             reviewedAt,
             updatedAt: reviewedAt,
           });
+          logActionInTransaction(transaction, {
+            actorId: req.user!.uid,
+            actorName: req.user!.name,
+            actorRole: req.user!.role,
+            actorEmail: req.user!.email,
+            action: 'user_created',
+            targetType: 'user',
+            targetId: userRecord.uid,
+            details: { email: profile.email, role, barangayId: profile.barangayId, accessRequestId },
+          });
         }
         return nextDisplayId;
       });
     } catch (profileError) {
-      await auth.deleteUser(userRecord.uid).catch(() => {});
+      await removeCreatedAuthAccount(userRecord.uid);
       throw profileError;
     }
 
+    if (accessRequestRef) invalidateFirestoreReadCache('auditLogs:');
     try {
-      await writeAudit(req, 'user_created', userRecord.uid, { email: profile.email, role, barangayId: profile.barangayId, ...(accessRequestId ? { accessRequestId } : {}) });
+      if (!accessRequestRef) {
+        await writeAudit(req, 'user_created', userRecord.uid, { email: profile.email, role, barangayId: profile.barangayId });
+      }
     } catch (auditError) {
       await db.doc(`users/${userRecord.uid}`).delete().catch(() => {});
       if (accessRequestRef) {
         await accessRequestRef.update({ status: 'Pending', registeredUserId: null, registeredAt: null, reviewedBy: null, reviewedByName: null, reviewedAt: null, updatedAt: new Date() }).catch(() => {});
       }
-      await auth.deleteUser(userRecord.uid).catch(() => {});
+      await removeCreatedAuthAccount(userRecord.uid);
       throw auditError;
     }
     res.status(201).json({ data: { id: userRecord.uid, ...profile, displayId } });
@@ -237,6 +266,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     if (error.code === 'access-request/not-found') return res.status(404).json({ error: 'Access request not found.' });
     if (error.code === 'access-request/not-pending') return res.status(409).json({ error: 'This access request is no longer pending.' });
     if (error.code === 'access-request/role-mismatch') return res.status(400).json({ error: 'The selected account role does not match the access request.' });
+    if (error.code === 'access-request/email-mismatch') return res.status(400).json({ error: 'The registered email must match the access request.' });
     if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to create account.' });
   }
