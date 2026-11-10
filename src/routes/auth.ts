@@ -1,7 +1,8 @@
 import { Router } from 'express';
-import { db } from '../config/firebaseAdmin';
+import { auth, db } from '../config/firebaseAdmin';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { normalizeRole } from '../services/roles';
+import { recordAuthenticatedActivity } from '../services/activityTracking';
 
 const router = Router();
 const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY;
@@ -93,7 +94,15 @@ router.post('/login', async (req, res) => {
       return res.status(403).json({ error: 'Only Super Admin or LGU/MDRRMO personnel can access the LigTAS web dashboard.' });
     }
 
-        return res.json({
+    try {
+      const verifiedToken = await auth.verifyIdToken(signInData.idToken);
+      if (verifiedToken.uid === uid) await recordAuthenticatedActivity(uid, verifiedToken.auth_time);
+    } catch (activityError: any) {
+      // Keep a valid sign-in available if activity logging is temporarily unavailable.
+      console.error('Record web login activity failed:', activityError?.code ?? 'unknown');
+    }
+
+    return res.json({
       data: {
         token: signInData.idToken,
         user: {

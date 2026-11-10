@@ -1,11 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
 import { isFirestoreResourceExhausted } from '../services/firestoreErrors';
-import { recordAuthenticatedActivity, shouldTrackAuthenticatedActivity } from '../services/activityTracking';
 import { isMunicipalityAdmin, normalizeRole } from '../services/roles';
 
 export interface AuthenticatedRequest extends Request {
-  user?: { uid: string; role: string; barangayId: string | null; name: string; email: string };
+  user?: { uid: string; role: string; barangayId: string | null; name: string; email: string; authTime?: number };
   profile?: Record<string, any>;
 }
 
@@ -30,13 +29,9 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
       barangayId: profile.barangayId ?? null,
       name: profile.name ?? profile.displayName ?? '',
       email: profile.email ?? decoded.email ?? '',
+      authTime: decoded.auth_time,
     };
     req.profile = { ...profile, role };
-    if (shouldTrackAuthenticatedActivity(role)) {
-      void recordAuthenticatedActivity(decoded.uid, decoded.auth_time).catch((activityError: any) => {
-        console.error('Record authenticated activity failed:', activityError?.code ?? 'unknown');
-      });
-    }
     next();
   } catch (error: any) {
     const invalidTokenCodes = ['auth/argument-error', 'auth/invalid-id-token', 'auth/id-token-expired', 'auth/id-token-revoked', 'auth/user-disabled', 'auth/user-not-found'];

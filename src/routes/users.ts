@@ -7,6 +7,7 @@ import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors
 import { firebaseAuthPhotoUrl, isValidEmail, isValidProfilePhoto } from '../services/profileFields';
 import { allocateDisplayId } from '../services/recordDisplayIds';
 import { normalizeRole, SUPER_ADMIN_ROLE_VALUES } from '../services/roles';
+import { recordAuthenticatedActivity, shouldTrackAuthenticatedActivity } from '../services/activityTracking';
 
 const router = Router();
 const accountRoles = ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'] as const;
@@ -46,6 +47,22 @@ async function sendFirebasePasswordReset(email: string) {
 }
 
 router.use(requireAuth);
+
+// POST /users/activity — record authenticated use for the UID in the verified token.
+// The request body is intentionally ignored; clients cannot choose an account or timestamp.
+router.post('/activity', async (req: AuthenticatedRequest, res) => {
+  if (!shouldTrackAuthenticatedActivity(req.user!.role)) {
+    return res.status(403).json({ error: 'This account cannot record application activity.' });
+  }
+  try {
+    await recordAuthenticatedActivity(req.user!.uid, req.user!.authTime);
+    res.status(204).end();
+  } catch (error: any) {
+    console.error('Record authenticated activity failed:', error?.code ?? 'unknown');
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    res.status(503).json({ error: 'Activity could not be recorded. Please retry when connected.' });
+  }
+});
 
 // GET /users/access — role-aware capabilities for the web account directory.
 router.get('/access', async (req: AuthenticatedRequest, res) => {

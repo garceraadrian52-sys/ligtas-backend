@@ -20,12 +20,12 @@ export function createActivityRecorder(
   const lastActivityWrite = new Map<string, number>();
   const lastAuthTime = new Map<string, number>();
 
-  return async (uid: string, authTimeSeconds?: number) => {
+  return async (uid: string, authTimeSeconds?: number, includeActivity = true) => {
     const now = clock();
     const authTimeMs = Number.isFinite(authTimeSeconds) && Number(authTimeSeconds) > 0
       ? Math.floor(Number(authTimeSeconds) * 1000)
       : null;
-    const writeActivity = now - (lastActivityWrite.get(uid) ?? 0) >= intervalMs;
+    const writeActivity = includeActivity && now - (lastActivityWrite.get(uid) ?? 0) >= intervalMs;
     const writeLogin = authTimeMs !== null && lastAuthTime.get(uid) !== authTimeMs;
     if (!writeActivity && !writeLogin) return false;
 
@@ -49,5 +49,9 @@ const recordActivity = createActivityRecorder((uid, updates) =>
 );
 
 export function recordAuthenticatedActivity(uid: string, authTimeSeconds?: number) {
-  return recordActivity(uid, authTimeSeconds);
+  return recordActivity(uid, authTimeSeconds, true);
+}
+
+export function recordAuthenticatedLogin(uid: string, authTimeSeconds?: number) {
+  return recordActivity(uid, authTimeSeconds, false);
 }

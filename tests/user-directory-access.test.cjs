@@ -31,10 +31,17 @@ const db = {
 };
 
 require.cache[require.resolve('../dist/config/firebaseAdmin')] = { exports: { db, auth: {} } };
+const activityWrites = [];
+require.cache[require.resolve('../dist/services/activityTracking')] = {
+  exports: {
+    async recordAuthenticatedActivity(uid, authTime) { activityWrites.push({ uid, authTime }); },
+    shouldTrackAuthenticatedActivity() { return true; },
+  },
+};
 require.cache[require.resolve('../dist/middleware/auth')] = {
   exports: {
     requireAuth(req, _res, next) {
-      req.user = { uid: 'caller', role: req.get('x-role') || 'LGU_ADMIN', name: 'Caller', email: 'caller@example.com' };
+      req.user = { uid: 'verified-caller-uid', authTime: 1_800_000_000, role: req.get('x-role') || 'LGU_ADMIN', name: 'Caller', email: 'caller@example.com' };
       next();
     },
   },
@@ -103,4 +110,15 @@ test('Super Admin resident account changes stay outside the staff-management end
   assert.equal(patchResponse.status, 403);
   const deleteResponse = await fetch(`${base}/resident-uid`, { method: 'DELETE', headers: { 'x-role': 'SUPER_ADMIN' } });
   assert.equal(deleteResponse.status, 403);
+});
+
+test('activity endpoint records only the authenticated UID and ignores client identity and timestamps', async () => {
+  activityWrites.length = 0;
+  const response = await fetch(`${base}/activity`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-role': 'RESIDENT' },
+    body: JSON.stringify({ uid: 'another-account', lastActiveAt: '1999-01-01T00:00:00Z' }),
+  });
+  assert.equal(response.status, 204);
+  assert.deepEqual(activityWrites, [{ uid: 'verified-caller-uid', authTime: 1_800_000_000 }]);
 });

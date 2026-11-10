@@ -37,3 +37,19 @@ test('authenticated activity writes are throttled and login time is derived from
   assert.equal(writes[2].updates.lastActiveAt, undefined);
   assert.equal(writes[2].updates.lastLoginAt.toMillis(), 9_000);
 });
+
+test('login-only recording never marks passive API requests as Last Active', async () => {
+  let now = 10_000;
+  const writes = [];
+  const record = createActivityRecorder(async (uid, updates) => writes.push({ uid, updates }), 1_000, () => now);
+
+  assert.equal(await record('user-1', 8, false), true);
+  assert.deepEqual(Object.keys(writes[0].updates), ['lastLoginAt']);
+  assert.equal(writes[0].updates.lastLoginAt.toMillis(), 8_000);
+  assert.equal(await record('user-1', 8, false), false);
+  assert.equal(writes.length, 1);
+
+  assert.equal(await record('user-1', 8, true), true);
+  assert.ok(writes[1].updates.lastActiveAt);
+  assert.equal(writes[1].updates.lastLoginAt, undefined);
+});
