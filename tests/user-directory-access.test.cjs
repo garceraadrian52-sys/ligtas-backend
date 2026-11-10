@@ -14,13 +14,19 @@ const account = {
   lastLoginAt: new Date('2026-11-08T18:00:00.000Z'),
   privateToken: 'must-not-leak',
 };
+const residentAccount = { name: 'Resident Example', email: 'resident@example.com', role: 'RESIDENT', phone: '555-0000', barangayId: 'barangay_longos', displayId: 'USR0012', disabled: false, lastActiveAt: new Date('2026-11-09T03:00:00.000Z'), lastLoginAt: new Date('2026-11-08T19:00:00.000Z'), householdId: 'private-household', password: 'must-not-leak', pushToken: 'must-not-leak' };
 const db = {
   collection(name) {
     assert.equal(name, 'users');
     return { async get() { return { docs: [
       { id: 'official-uid', data: () => ({ ...account }) },
-      { id: 'resident-uid', data: () => ({ name: 'Resident Private', email: 'resident@example.com', role: 'RESIDENT', phone: '555-0000' }) },
+      { id: 'resident-uid', data: () => ({ ...residentAccount }) },
+      { id: 'unknown-uid', data: () => ({ name: 'Unknown role', role: 'unknown-role' }) },
     ] }; } };
+  },
+  doc(path) {
+    if (path === 'users/resident-uid') return { async get() { return { exists: true, data: () => ({ ...residentAccount }) }; } };
+    throw new Error(`Unexpected document read: ${path}`);
   },
 };
 
@@ -53,7 +59,7 @@ after(() => {
   server.close();
 });
 
-test('LGU Admin can view user access capabilities and receives a read-only directory', async () => {
+test('LGU Admin can view user access capabilities and receives a safe read-only resident directory', async () => {
   const accessResponse = await fetch(`${base}/access`, { headers: { 'x-role': 'LGU_ADMIN' } });
   const access = await accessResponse.json();
   assert.equal(accessResponse.status, 200);
@@ -66,7 +72,17 @@ test('LGU Admin can view user access capabilities and receives a read-only direc
   assert.equal(list.data[0].lastActiveAt, account.lastActiveAt.toISOString());
   assert.equal(list.data[0].lastLoginAt, account.lastLoginAt.toISOString());
   assert.equal('privateToken' in list.data[0], false);
-  assert.equal(list.data.some(user => user.id === 'resident-uid'), false);
+  const resident = list.data.find(user => user.id === 'resident-uid');
+  assert.equal(resident.role, 'RESIDENT');
+  assert.equal(resident.displayId, 'USR0012');
+  assert.equal(resident.barangayId, 'barangay_longos');
+  assert.equal(resident.lastActiveAt, '2026-11-09T03:00:00.000Z');
+  assert.equal(resident.lastLoginAt, '2026-11-08T19:00:00.000Z');
+  assert.equal('householdId' in resident, false);
+  assert.equal('password' in resident, false);
+  assert.equal('pushToken' in resident, false);
+  assert.equal('privateToken' in resident, false);
+  assert.equal(list.data.some(user => user.id === 'unknown-uid'), false);
 });
 
 test('LGU Admin cannot create an account even if a Super Admin role is submitted', async () => {
@@ -76,4 +92,15 @@ test('LGU Admin cannot create an account even if a Super Admin role is submitted
     body: JSON.stringify({ name: 'Attempted Admin', email: 'new@example.com', role: 'SUPER_ADMIN' }),
   });
   assert.equal(response.status, 403);
+});
+
+test('Super Admin resident account changes stay outside the staff-management endpoints', async () => {
+  const patchResponse = await fetch(`${base}/resident-uid`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-role': 'SUPER_ADMIN' },
+    body: JSON.stringify({ name: 'Changed', role: 'LGU_ADMIN' }),
+  });
+  assert.equal(patchResponse.status, 403);
+  const deleteResponse = await fetch(`${base}/resident-uid`, { method: 'DELETE', headers: { 'x-role': 'SUPER_ADMIN' } });
+  assert.equal(deleteResponse.status, 403);
 });

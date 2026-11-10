@@ -12,6 +12,13 @@ const router = Router();
 const accountRoles = ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'] as const;
 type AccountRole = typeof accountRoles[number];
 
+function directoryRole(value: unknown): AccountRole | 'RESIDENT' | null {
+  const raw = String(value ?? '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (raw === 'resident') return 'RESIDENT';
+  const role = normalizeRole(value);
+  return accountRoles.includes(role as AccountRole) ? role as AccountRole : null;
+}
+
 async function writeAudit(req: AuthenticatedRequest, action: string, targetId: string, details: Record<string, unknown>) {
   await logAction({
     actorId: req.user!.uid,
@@ -65,26 +72,27 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
     const snapshot = await db.collection('users').get();
     const users = snapshot.docs
-      .filter(doc => accountRoles.includes(normalizeRole(doc.data().role) as AccountRole))
       .map(doc => {
         const item = doc.data();
-        const role = normalizeRole(item.role) as AccountRole;
+        const role = directoryRole(item.role);
+        if (!role) return null;
         return {
           id: doc.id,
           displayId: item.displayId ?? null,
           name: item.name ?? item.displayName ?? '',
           displayName: item.displayName ?? item.name ?? '',
-          email: item.email ?? '',
-          phone: item.phone ?? '',
-          photoURL: item.photoURL ?? item.photoUrl ?? null,
+          email: item.email ?? item.emailAddress ?? '',
+          phone: item.phone ?? item.phoneNumber ?? '',
+          ...(role !== 'RESIDENT' ? { photoURL: item.photoURL ?? item.photoUrl ?? null } : {}),
           role,
-          barangayId: item.barangayId ?? null,
+          barangayId: item.barangayId ?? (role === 'RESIDENT' ? item.barangay ?? null : null),
           disabled: item.disabled === true,
           lastActiveAt: item.lastActiveAt ?? null,
           lastLoginAt: item.lastLoginAt ?? null,
           createdAt: item.createdAt ?? null,
         };
-      });
+      })
+      .filter((user): user is NonNullable<typeof user> => user !== null);
     res.json({ data: users });
   } catch (error) {
     console.error('List users failed:', error);
