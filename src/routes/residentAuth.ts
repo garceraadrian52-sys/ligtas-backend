@@ -6,7 +6,7 @@ import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors
 import { validDocumentId } from '../services/inputValidation';
 
 const router = Router();
-const invalidLogin = 'Invalid mobile number or password.';
+const invalidLogin = 'Invalid mobile number or password. Try your email or recover an existing SMS account.';
 const duplicatePhone = 'This mobile number is already registered. Sign in or recover your account.';
 
 function normalizeMobile(value: unknown) {
@@ -33,14 +33,29 @@ function isResident(role: unknown) {
 
 async function legacyProfiles(phone: string) {
   // Earlier clients stored the normalized local number or the SMS E.164 number.
-  const formats = [phone, `0${phone}`, `63${phone}`, `+63${phone}`];
+  const formats: (string | number)[] = [Number(phone), Number(`63${phone}`)];
+  const area = phone.slice(0, 3);
+  const middle = phone.slice(3, 6);
+  const end = phone.slice(6);
+  for (const prefix of ['', '0', '63', '+63']) {
+    const start = prefix + area;
+    formats.push(prefix + phone, `${start} ${middle} ${end}`, `${start}-${middle}-${end}`);
+    if (prefix === '63' || prefix === '+63') {
+      formats.push(`${prefix} ${phone}`, `${prefix} ${area} ${middle} ${end}`, `${prefix} ${area}-${middle}-${end}`,
+        `${prefix}-${area}-${middle}-${end}`, `(${prefix}) ${area} ${middle} ${end}`);
+    }
+  }
   const users = db.collection('users');
   const [current, older] = await Promise.all([
     users.where('phone', 'in', formats).get(),
     users.where('phoneNumber', 'in', formats).get(),
   ]);
-  return [...current.docs, ...older.docs.filter(profile => !profile.get('phone'))]
-    .filter(profile => isResident(profile.get('role')));
+  const profiles = new Map(current.docs.map(profile => [profile.id, profile]));
+  for (const profile of older.docs) {
+    const primary = profile.get('phone');
+    if (!normalizeMobile(typeof primary === 'number' ? String(primary) : primary)) profiles.set(profile.id, profile);
+  }
+  return [...profiles.values()].filter(profile => isResident(profile.get('role')));
 }
 
 async function phoneAccounts(phone: string) {
@@ -50,15 +65,35 @@ async function phoneAccounts(phone: string) {
   ]);
 }
 
-async function resolvePhoneUser(phone: string) {
+async function resolvePhoneUsers(phone: string) {
   const index = await phoneIndex(phone).get();
   const indexedUid = index.get('uid');
-  if (typeof indexedUid === 'string') return lookupAuth(auth.getUser(indexedUid));
-  const accounts = await phoneAccounts(phone);
-  const known = [...new Set(accounts.flatMap(account => account ? [account.uid] : []))];
-  if (known.length) return known.length === 1 ? accounts.find(account => account?.uid === known[0]) ?? null : null;
-  const legacy = await legacyProfiles(phone);
-  return legacy.length === 1 ? lookupAuth(auth.getUser(legacy[0].id)) : null;
+  if (typeof indexedUid === 'string') return [await lookupAuth(auth.getUser(indexedUid))];
+  const [accounts, legacy] = await Promise.all([phoneAccounts(phone), legacyProfiles(phone)]);
+  const known = new Map(accounts.flatMap(account => account ? [[account.uid, account] as const] : []));
+  const otherUids = legacy.map(profile => profile.id).filter(uid => !known.has(uid));
+  // A shared legacy number is safe only if exactly one candidate can prove
+  // the supplied password. Bound the work done for corrupted or shared data.
+  if (known.size + otherUids.length > 4) return [];
+  return [...known.values(), ...await Promise.all(otherUids.map(uid => lookupAuth(auth.getUser(uid))))];
+}
+
+async function verifyPassword(account: UserRecord, password: string, origin: string, apiKey: string) {
+  const verified = await fetch(`${origin}/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(12_000),
+    body: JSON.stringify({ email: account.email, password, returnSecureToken: true }),
+  });
+  if (verified.status >= 500) throw new Error('Identity service unavailable');
+  const credentials = await verified.json() as { localId?: string; idToken?: string; mfaPendingCredential?: string; error?: { message?: string } };
+  const code = credentials.error?.message ?? '';
+  if (verified.status === 429 || code.startsWith('TOO_MANY_ATTEMPTS')) return 'throttled';
+  if (verified.status === 403 || /^(API_KEY_INVALID|PROJECT_NOT_FOUND|OPERATION_NOT_ALLOWED|CONFIGURATION_NOT_FOUND)\b/.test(code)) {
+    throw new Error('Identity service configuration unavailable');
+  }
+  return verified.ok && credentials.localId === account.uid && credentials.idToken && !credentials.mfaPendingCredential
+    ? 'verified' : 'rejected';
 }
 
 const attempts = new Map<string, { count: number; expires: number }>();
@@ -111,7 +146,7 @@ router.post('/register', async (req, res) => {
         const now = new Date();
         transaction.create(profile, {
           name: name.trim(), displayName: name.trim(), phone, email, barangayId,
-          role: 'RESIDENT', householdId: null, createdAt: now, updatedAt: now,
+          role: 'RESIDENT', householdId: null, emailVerificationRequired: Boolean(email), createdAt: now, updatedAt: now,
         });
         transaction.create(index, { uid, createdAt: now });
       });
@@ -139,6 +174,30 @@ router.post('/register', async (req, res) => {
   }
 });
 
+router.post('/recover/check', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const phone = normalizeMobile(req.body?.phone);
+  if (!phone) return res.status(400).json({ error: 'Enter a valid Philippine mobile number.' });
+  if (!withinLimit(`recovery:ip:${req.ip}`, 60) || !withinLimit(`recovery:phone:${phone}`, 5)) {
+    return res.set('Retry-After', '60').status(429).json({ error: 'Too many attempts. Please try again later.' });
+  }
+  const unavailable = 'SMS password setup is unavailable for this number. Try email sign-in or contact LigTAS support.';
+  try {
+    const account = await lookupAuth(auth.getUserByPhoneNumber(`+63${phone}`));
+    if (!account || account.disabled || account.email || account.providerData.some(provider => provider.providerId === 'password')) {
+      return res.status(404).json({ error: unavailable });
+    }
+    const profile = await db.doc(`users/${account.uid}`).get();
+    if (!isResident(profile.get('role')) || profile.get('disabled') === true) return res.status(404).json({ error: unavailable });
+    // Eligibility alone grants no authentication or password change.
+    return res.json({ data: { eligible: true } });
+  } catch (error) {
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    console.error('Resident recovery check unavailable:', (error as { code?: string }).code ?? 'unknown');
+    return res.status(503).json({ error: 'Account recovery is temporarily unavailable. Please try again.' });
+  }
+});
+
 router.post('/login', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   const phone = normalizeMobile(req.body?.phone);
@@ -153,29 +212,21 @@ router.post('/login', async (req, res) => {
   const emulator = process.env.NODE_ENV !== 'production' && process.env.FIREBASE_AUTH_EMULATOR_HOST;
   if (!apiKey && !emulator) return res.status(503).json({ error: 'Mobile number sign-in is temporarily unavailable.' });
   try {
-    const account = await resolvePhoneUser(phone);
-    if (!account?.email || account.disabled) return res.status(401).json({ error: invalidLogin });
+    const accounts = (await resolvePhoneUsers(phone)).filter((account): account is UserRecord => Boolean(account?.email && !account.disabled));
     const origin = emulator
       ? `http://${emulator}/identitytoolkit.googleapis.com`
       : 'https://identitytoolkit.googleapis.com';
-    const verified = await fetch(`${origin}/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey || 'demo-key')}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({ email: account.email, password, returnSecureToken: true }),
-    });
-    if (verified.status === 429) return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
-    if (verified.status >= 500) throw new Error('Identity service unavailable');
-    const credentials = await verified.json() as { localId?: string; idToken?: string; mfaPendingCredential?: string; error?: { message?: string } };
-    if (credentials.error?.message?.startsWith('TOO_MANY_ATTEMPTS')) {
+    const candidates = await Promise.all(accounts.map(async account => {
+      const profile = await db.doc(`users/${account.uid}`).get();
+      if (!isResident(profile.get('role')) || profile.get('disabled') === true) return { account, state: 'rejected' };
+      return { account, state: await verifyPassword(account, password, origin, apiKey || 'demo-key') };
+    }));
+    if (candidates.some(candidate => candidate.state === 'throttled')) {
       return res.status(429).json({ error: 'Too many attempts. Please try again later.' });
     }
-    if (!verified.ok || credentials.localId !== account.uid || !credentials.idToken || credentials.mfaPendingCredential) {
-      return res.status(401).json({ error: invalidLogin });
-    }
-    const profile = await db.doc(`users/${account.uid}`).get();
-    if (!isResident(profile.get('role'))) return res.status(401).json({ error: invalidLogin });
-    const token = await auth.createCustomToken(account.uid);
+    const matches = candidates.filter(candidate => candidate.state === 'verified');
+    if (matches.length !== 1) return res.status(401).json({ error: invalidLogin });
+    const token = await auth.createCustomToken(matches[0].account.uid);
     return res.json({ data: { token } });
   } catch (error) {
     if (respondToFirestoreResourceExhausted(res, error)) return;
