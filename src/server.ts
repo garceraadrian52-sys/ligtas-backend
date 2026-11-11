@@ -5,6 +5,7 @@ import { db } from './config/firebaseAdmin';
 import { areNotificationWorkersStarted, startNotificationWorkers } from './services/notificationWorker';
 import { startRecordDisplayIdWorkers } from './services/recordDisplayIdWorker';
 import authRoutes from './routes/auth';
+import residentAuthRoutes from './routes/residentAuth';
 import usersRoutes from './routes/users';
 import reportsRoutes from './routes/reports';
 import alertsRoutes from './routes/alerts';
@@ -36,6 +37,7 @@ app.use(allowedOrigins.length
 // with the user's Firestore profile. Keep the request limit bounded.
 app.use(express.json({ limit: '512kb' }));
 app.use('/auth', authRoutes);
+app.use('/auth/resident', residentAuthRoutes);
 app.use('/users', usersRoutes);
 app.use('/reports', reportsRoutes);
 app.use('/alerts', alertsRoutes);
