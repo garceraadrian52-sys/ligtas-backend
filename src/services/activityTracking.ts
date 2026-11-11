@@ -1,5 +1,7 @@
 import { FieldValue, Timestamp } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
+import { logActionInTransaction } from './auditLog';
+import { normalizeRole } from './roles';
 
 export const ACTIVITY_WRITE_INTERVAL_MS = 15 * 60 * 1000;
 export const ACTIVITY_TRACKED_ROLES = Object.freeze([
@@ -112,6 +114,7 @@ const recorder = createActivityRecorder(
       if (includeActivity) updates.lastActiveAt = FieldValue.serverTimestamp();
       if (Object.keys(updates).length === 0) return false;
       transaction.set(ref, updates, { merge: true });
+      if (loginAt) { const profile=snapshot.data() || {}; logActionInTransaction(transaction,{actorId:uid,actorName:profile.name || profile.displayName || 'Not recorded',actorRole:normalizeRole(profile.role),actorBarangayId:profile.barangayId ?? null,action:'login_succeeded',targetType:'user',targetId:uid}); }
       return true;
     });
   },

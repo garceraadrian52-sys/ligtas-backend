@@ -1,0 +1,4 @@
+const assert=require('node:assert/strict');const{test}=require('node:test');let disabled=true;
+require.cache[require.resolve('../dist/config/firebaseAdmin')]={exports:{auth:{verifyIdToken:async()=>({uid:'resident'})},db:{doc:()=>({get:async()=>({data:()=>({role:'RESIDENT',disabled})})})}}};
+const{requireAuth}=require('../dist/middleware/auth');
+test('deactivated profiles cannot access authenticated API routes even with an unexpired token',async()=>{let next=false,status,body;const req={headers:{authorization:'Bearer existing-token'}};const res={status(code){status=code;return this},json(value){body=value;return this}};await requireAuth(req,res,()=>{next=true});assert.equal(status,403);assert.equal(next,false);assert.match(body.error,/deactivated/);disabled=false;await requireAuth(req,res,()=>{next=true});assert.equal(next,true)});

@@ -1,3 +1,5 @@
+import { auditActor, logActionInTransaction } from '../services/auditLog';
+import { invalidateFirestoreReadCache } from '../services/firestoreReadCache';
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
@@ -72,8 +74,10 @@ router.patch('/emergency-mode', requireAuth, requireOfficial, async (req: Authen
         changedAt: new Date(),
       };
       transaction.set(modeRef, updated, { merge: true });
+      logActionInTransaction(transaction,{...auditActor(req.user!),action:active?'emergency_mode_activated':'emergency_mode_deactivated',targetType:'emergencyMode',targetId:'emergencyMode',details:{active,revision:updated.revision}});
       return { ...currentState, ...updated };
     });
+    invalidateFirestoreReadCache('auditLogs:');
     res.json({ data });
   } catch (error) {
     if (error instanceof Error && error.name === 'EmergencyModeRevisionConflict') {

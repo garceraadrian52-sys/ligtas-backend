@@ -250,7 +250,7 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
         actorId: req.user!.uid,
         actorName: req.user!.name,
         actorRole: req.user!.role,
-        actorEmail: req.user!.email,
+        actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
         action: 'access_request_rejected',
         targetType: 'accessRequest',
         targetId: String(req.params.id),

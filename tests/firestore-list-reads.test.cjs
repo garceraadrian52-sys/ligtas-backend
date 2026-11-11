@@ -11,7 +11,7 @@ let reportDisplayId = 0;
 let reads = { reports: 0, auditLogs: 0 };
 const records = {
   reports: [{ id: 'report-1', data: { type: 'flood', status: 'Verified', barangayId: 'wawa' } }],
-  auditLogs: [{ id: 'audit-1', data: { action: 'created', timestamp: new Date('2026-11-08T00:00:00Z') } }],
+  auditLogs: [{ id: 'audit-1', data: { action: 'report_submitted', targetType:'report', timestamp: new Date('2026-11-08T00:00:00Z') } }],
 };
 
 const db = {

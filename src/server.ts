@@ -5,6 +5,7 @@ import { db } from './config/firebaseAdmin';
 import { areNotificationWorkersStarted, startNotificationWorkers } from './services/notificationWorker';
 import { startRecordDisplayIdWorkers } from './services/recordDisplayIdWorker';
 import authRoutes from './routes/auth';
+import { auditFailures } from './middleware/auditFailures';
 import usersRoutes from './routes/users';
 import reportsRoutes from './routes/reports';
 import alertsRoutes from './routes/alerts';
@@ -35,6 +36,7 @@ app.use(allowedOrigins.length
 // Profile images are resized in the web client before upload and stored inline
 // with the user's Firestore profile. Keep the request limit bounded.
 app.use(express.json({ limit: '512kb' }));
+app.use(auditFailures);
 app.use('/auth', authRoutes);
 app.use('/users', usersRoutes);
 app.use('/reports', reportsRoutes);
