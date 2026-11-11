@@ -63,13 +63,23 @@ router.get('/:id/occupants', async (req: AuthenticatedRequest, res) => {
     }
     const records = await db.collection('evacuationRecords')
       .where('evacuationCenterId', '==', req.params.id).get();
-    const households = records.docs.filter((record) => record.data().status !== 'checked_out').map((record) => {
+    const activeRecords = records.docs.filter((record) => record.data().status !== 'checked_out');
+    const householdIds = [...new Set(activeRecords
+      .map(record => String(record.data().householdId ?? ''))
+      .filter(id => /^H-[A-Z0-9-]{5,36}$/i.test(id)))];
+    const householdSnapshots = await Promise.all(householdIds.map(id => db.doc(`households/${id}`).get()));
+    const householdDisplayIds = new Map(householdSnapshots
+      .filter(snapshot => snapshot.exists)
+      .map(snapshot => [snapshot.id, snapshot.data()?.displayId]));
+    const households = activeRecords.map((record) => {
       const data = record.data();
       const names: string[] = Array.isArray(data.memberNames) ? data.memberNames : [];
       const relationships: string[] = Array.isArray(data.memberRelationships) ? data.memberRelationships : [];
+      const rawDisplayId = householdDisplayIds.get(String(data.householdId ?? ''));
       return {
         id: record.id,
-        household: data.householdName || data.householdId || 'Household',
+        household: data.householdName || 'Household',
+        householdDisplayId: typeof rawDisplayId === 'string' && /^HH-\d{5,}$/i.test(rawDisplayId) ? rawDisplayId.toUpperCase() : null,
         members: (Array.isArray(data.memberIds) ? data.memberIds : []).map((id: string, index: number) => ({
           name: names[index] || id,
           relationship: relationships[index] || 'Household member',

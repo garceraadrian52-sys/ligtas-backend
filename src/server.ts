@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { db } from './config/firebaseAdmin';
 import { areNotificationWorkersStarted, startNotificationWorkers } from './services/notificationWorker';
+import { startRecordDisplayIdWorkers } from './services/recordDisplayIdWorker';
 import authRoutes from './routes/auth';
 import usersRoutes from './routes/users';
 import reportsRoutes from './routes/reports';
@@ -17,6 +18,7 @@ import settingsRoutes from './routes/settings';
 import supportRoutes from './routes/support';
 import auditLogsRoutes from './routes/auditLogs';
 import accessRequestsRoutes from './routes/accessRequests';
+import householdsRoutes from './routes/households';
 import { requireAuth, requireOfficial } from './middleware/auth';
 
 import { notFound, errorHandler } from './middleware/errorHandler';
@@ -39,6 +41,7 @@ app.use('/reports', reportsRoutes);
 app.use('/alerts', alertsRoutes);
 app.use('/dashboard', dashboardRoutes);
 app.use('/evacuation-centers', evacuationCentersRoutes);
+app.use('/households', householdsRoutes);
 app.use('/analytics', analyticsRoutes);
 app.use('/map', mapRoutes);
 app.use('/notifications', notificationsRoutes);
@@ -78,6 +81,7 @@ if (require.main === module) {
   const host = process.env.HOST || '0.0.0.0';
   app.listen(port, host, () => {
     console.log(`LigTAS backend running on http://${host}:${port}`);
+    startRecordDisplayIdWorkers();
     if (process.env.ENABLE_NOTIFICATION_WORKERS === 'true') {
       startNotificationWorkers();
     } else {

@@ -73,3 +73,21 @@ test('existing canonical account IDs are returned without allocation', async () 
   assert.equal((await response.json()).data.accountId, 'ACC-00100');
   assert.equal(documents.get('recordIdCounters/users').lastIssued, 43);
 });
+
+test('different authenticated profiles receive distinct IDs without accepting a body-supplied UID', async () => {
+  documents.set('users/official-uid', { role: 'BARANGAY_OFFICIAL' });
+  const response = await fetch(base, { method: 'POST', headers: { 'x-uid': 'official-uid', 'content-type': 'application/json' }, body: JSON.stringify({ uid: 'resident-uid' }) });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).data.accountId, 'ACC-00044');
+  assert.equal(documents.get('users/official-uid').accountId, 'ACC-00044');
+  assert.equal(documents.get('users/resident-uid').accountId, 'ACC-00043');
+});
+
+test('legacy account ID assignment fails closed when its counter is corrupt', async () => {
+  documents.set('users/legacy-uid', { role: 'RESIDENT', displayId: 'ACC-00045' });
+  documents.set('recordIdCounters/users', { lastIssued: 'corrupt' });
+  const response = await fetch(base, { method: 'POST', headers: { 'x-uid': 'legacy-uid' } });
+  assert.equal(response.status, 503);
+  assert.equal(documents.get('users/legacy-uid').accountId, undefined);
+  assert.deepEqual(documents.get('recordIdCounters/users'), { lastIssued: 'corrupt' });
+});
