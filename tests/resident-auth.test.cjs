@@ -98,6 +98,11 @@ if (!enabled) {
     await db.doc(`users/${alias.uid}`).set({ role: 'RESIDENT', barangayId });
     await phoneLogin('09123456784', alias.uid);
     assert.equal((await signup({ phone: '09123456784' })).status, 409);
+
+    const older = await auth.createUser({ email: 'older-resident@example.test', password });
+    await db.doc(`users/${older.uid}`).set({ role: 'RESIDENT', phoneNumber: '639123456786', barangayId });
+    await phoneLogin('09123456786', older.uid);
+    assert.equal((await signup({ phone: '09123456786' })).status, 409);
   });
 
   test('password setup after SMS proof links the original Firebase UID', async () => {

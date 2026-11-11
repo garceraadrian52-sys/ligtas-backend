@@ -33,8 +33,14 @@ function isResident(role: unknown) {
 
 async function legacyProfiles(phone: string) {
   // Earlier clients stored the normalized local number or the SMS E.164 number.
-  const result = await db.collection('users').where('phone', 'in', [phone, `0${phone}`, `63${phone}`, `+63${phone}`]).get();
-  return result.docs.filter(profile => isResident(profile.data().role));
+  const formats = [phone, `0${phone}`, `63${phone}`, `+63${phone}`];
+  const users = db.collection('users');
+  const [current, older] = await Promise.all([
+    users.where('phone', 'in', formats).get(),
+    users.where('phoneNumber', 'in', formats).get(),
+  ]);
+  return [...current.docs, ...older.docs.filter(profile => !profile.get('phone'))]
+    .filter(profile => isResident(profile.get('role')));
 }
 
 async function phoneAccounts(phone: string) {
