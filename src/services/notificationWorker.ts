@@ -182,13 +182,15 @@ function startReportWatcher() {
       const before = reportCache.get(change.doc.id);
       const report = change.doc.data();
       reportCache.set(change.doc.id, report);
+      let displayId = typeof report.displayId === 'string' && report.displayId ? report.displayId : undefined;
 
-      if (reportsReady && change.type === 'added' && !(typeof report.displayId === 'string' && report.displayId)) {
-        await assignDisplayIdIfMissing(db, 'reports', change.doc.ref).catch((error) => console.error('Assign report display ID failed:', error));
+      if (change.type === 'added' && !displayId) {
+        displayId = (await assignDisplayIdIfMissing(db, 'reports', change.doc.ref)
+          .catch((error) => { console.error('Assign report display ID failed:', error); return null; })) ?? undefined;
       }
 
       if (change.type === 'added') {
-        await notifyAdmins('report', change.doc.id, report.displayId, 'New report submitted',
+        await notifyAdmins('report', change.doc.id, displayId, 'New report submitted',
           `${String(report.location ?? 'A resident location').slice(0, 180)}. Open report management to review.`)
           .catch((error) => console.error('Queue admin report inbox notification failed:', error));
       }

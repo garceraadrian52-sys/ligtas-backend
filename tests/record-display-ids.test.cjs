@@ -38,19 +38,19 @@ test('concurrent display ID allocations stay unique and sequential', async () =>
   const ids = await Promise.all(Array.from({ length: 80 }, () =>
     db.runTransaction(transaction => allocateDisplayId(transaction, db, 'reports'))));
   assert.equal(new Set(ids).size, 80);
-  assert.deepEqual([...ids].sort(), Array.from({ length: 80 }, (_, index) => `RPT${String(index + 1).padStart(4, '0')}`));
+  assert.deepEqual([...ids].sort(), Array.from({ length: 80 }, (_, index) => `RP-${String(index + 1).padStart(5, '0')}`));
 });
 
 test('display IDs keep growing after four digits and assignment is idempotent', async () => {
   const { db, documents } = memoryFirestore();
   documents.set('recordIdCounters/reports', { lastIssued: 9999 });
-  assert.equal(await db.runTransaction(transaction => allocateDisplayId(transaction, db, 'reports')), 'RPT10000');
+  assert.equal(await db.runTransaction(transaction => allocateDisplayId(transaction, db, 'reports')), 'RP-10000');
 
   const ref = db.doc('reports/firestore-internal-id');
   documents.set(ref.path, { title: 'Existing report without a readable ID' });
-  assert.equal(await assignDisplayIdIfMissing(db, 'reports', ref), 'RPT10001');
-  assert.equal(await assignDisplayIdIfMissing(db, 'reports', ref), 'RPT10001');
-  assert.equal(documents.get(ref.path).displayId, 'RPT10001');
+  assert.equal(await assignDisplayIdIfMissing(db, 'reports', ref), 'RP-10001');
+  assert.equal(await assignDisplayIdIfMissing(db, 'reports', ref), 'RP-10001');
+  assert.equal(documents.get(ref.path).displayId, 'RP-10001');
 });
 
 test('new user account IDs use the ACC prefix, five minimum digits, and preserve the existing counter', async () => {
@@ -59,4 +59,18 @@ test('new user account IDs use the ACC prefix, five minimum digits, and preserve
   documents.set('recordIdCounters/users', { lastIssued: 99999, prefix: 'USR' });
   assert.equal(await db.runTransaction(transaction => allocateDisplayId(transaction, db, 'users')), 'ACC-100000');
   assert.equal(documents.get('recordIdCounters/users').lastIssued, 100000);
+});
+
+test('household IDs use HH and stay unique under concurrent allocation', async () => {
+  const { db } = memoryFirestore();
+  const ids = await Promise.all(Array.from({ length: 80 }, () =>
+    db.runTransaction(transaction => allocateDisplayId(transaction, db, 'households'))));
+  assert.equal(new Set(ids).size, 80);
+  assert.deepEqual([...ids].sort(), Array.from({ length: 80 }, (_, index) => `HH-${String(index + 1).padStart(5, '0')}`));
+});
+
+test('invalid counters fail closed instead of resetting and risking ID reuse', async () => {
+  const { db, documents } = memoryFirestore();
+  documents.set('recordIdCounters/reports', { lastIssued: 'bad' });
+  await assert.rejects(db.runTransaction(transaction => allocateDisplayId(transaction, db, 'reports')), /refusing to reset/i);
 });

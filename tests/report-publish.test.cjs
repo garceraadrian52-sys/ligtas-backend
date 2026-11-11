@@ -12,7 +12,7 @@ test('resolved/closed alerts cannot be reactivated through publish',async()=>{fo
 test('report inputs reject malformed fields and retain valid map coordinates',async()=>{
  const request=body=>fetch(base+'/reports',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'flood',location:'Wawa',description:'Water on road',...body})});
  for(const body of [{location:' '},{description:{}},{latitude:14.8},{latitude:true,longitude:120},{barangayId:'a/b'},{waterLevel:{}}]){createdReport=null;assert.equal((await request(body)).status,400);assert.equal(createdReport,null)}
- assert.equal((await request({latitude:14.8,longitude:120.9})).status,201);assert.equal(createdReport.latitude,14.8);assert.equal(createdReport.longitude,120.9);assert.equal(createdReport.displayId,'RPT0001');
+ assert.equal((await request({latitude:14.8,longitude:120.9})).status,201);assert.equal(createdReport.latitude,14.8);assert.equal(createdReport.longitude,120.9);assert.equal(createdReport.displayId,'RP-00001');
 });
 
 test('Super Admin account creation rejects malformed names/passwords and unassigned officials',async()=>{

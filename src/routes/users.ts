@@ -145,7 +145,10 @@ router.post('/account-id', async (req: AuthenticatedRequest, res) => {
           const counterRef = db.doc('recordIdCounters/users');
           const counterSnapshot = await transaction.get(counterRef);
           const savedCounter = counterSnapshot.exists ? counterSnapshot.data()?.lastIssued : 0;
-          const lastIssued = typeof savedCounter === 'number' && Number.isSafeInteger(savedCounter) && savedCounter >= 0 ? savedCounter : 0;
+          if (typeof savedCounter !== 'number' || !Number.isSafeInteger(savedCounter) || savedCounter < 0) {
+            throw new Error('The account ID counter is invalid; refusing to reset it.');
+          }
+          const lastIssued = savedCounter;
           transaction.update(userRef, { accountId: legacyId, updatedAt: new Date() });
           if (accountIdSequence(legacyId) > lastIssued) {
             transaction.set(counterRef, { prefix: 'ACC-', lastIssued: accountIdSequence(legacyId), updatedAt: new Date() }, { merge: true });
