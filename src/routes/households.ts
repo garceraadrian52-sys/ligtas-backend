@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { normalizeRole } from '../services/roles';
+import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { findHouseholdByDisplayId, normalizeHouseholdDisplayId } from '../services/householdReference';
 import { FieldValue } from 'firebase-admin/firestore';
 import { HouseholdEditError, validateHouseholdEdit } from '../services/householdEditing';
@@ -29,7 +30,7 @@ router.post('/requests/:requestId/decision', requireAuth, async (req: Authentica
     return res.status(400).json({ error: 'Select Approve or Reject for a valid request.' });
   }
   try {
-    const data = await decideMembership(db, String(req.params.requestId), req.user!.uid, req.body.approve);
+    const data = await decideMembership(db, String(req.params.requestId), req.user!.uid, req.body.approve, req.body.identityConfirmed === true);
     res.status('conflict' in data ? 409 : 200).json({ data, ...('message' in data ? { error: data.message } : {}) });
   } catch (error) { membershipFailure(error, res); }
 });
@@ -43,6 +44,7 @@ router.post('/', requireAuth, async (req: AuthenticatedRequest, res) => {
 });
 
 function membershipFailure(error: unknown, res: import('express').Response) {
+  if (respondToFirestoreResourceExhausted(res, error)) return;
   if (error instanceof MembershipError) { res.status(error.status).json({ error: error.message }); return; }
   console.error('Household membership operation failed:', error);
   res.status(503).json({ error: 'Household membership is temporarily unavailable. Please try again.' });

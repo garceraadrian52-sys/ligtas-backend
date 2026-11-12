@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const { householdStore } = require('./helpers/householdStore.cjs');
 const { previewHousehold, resolveJoinReference, requestMembership, decideMembership, createResidentHousehold } = require('../dist/services/householdMembership');
 const { validateHouseholdEdit } = require('../dist/services/householdEditing');
-const link = (db, uid = 'maria', memberId = 'manual-maria') => requestMembership(db, 'H-DELACRUZ', uid, { requestType: 'link_existing', memberId });
+const link = (db, uid = 'maria', memberId = 'manual-maria') => requestMembership(db, 'H-DELACRUZ', uid, { memberId });
 
 test('resident previews only minimum member identification and selects an existing manual member', async () => {
   const { db, records } = householdStore();
@@ -25,9 +25,9 @@ test('resident previews only minimum member identification and selects an existi
 test('head approval links exactly the selected record, preserves identity and member count, and is idempotent', async () => {
   const { db, records } = householdStore();
   const request = await link(db);
-  await assert.rejects(decideMembership(db, request.id, 'other', true), error => error.status === 403);
-  assert.equal((await decideMembership(db, request.id, 'juan', true)).status, 'Approved');
-  assert.equal((await decideMembership(db, request.id, 'juan', true)).status, 'Approved');
+  await assert.rejects(decideMembership(db, request.id, 'other', true, true), error => error.status === 403);
+  assert.equal((await decideMembership(db, request.id, 'juan', true, true)).status, 'Approved');
+  assert.equal((await decideMembership(db, request.id, 'juan', true, true)).status, 'Approved');
   const household = records.get('households/H-DELACRUZ');
   assert.equal(household.members.length, 3);
   assert.deepEqual(household.members[1], { id: 'manual-maria', name: 'Maria Dela Cruz', relationship: 'Wife', userId: 'maria' });
@@ -47,10 +47,10 @@ test('already linked members and the legacy head cannot be selected', async () =
 
 test('not-listed requests add nobody until head approval and then create one linked member', async () => {
   const { db, records } = householdStore();
-  const request = await requestMembership(db, 'H-DELACRUZ', 'other', { requestType: 'add_new', relationship: 'Son' });
+  const request = await requestMembership(db, 'H-DELACRUZ', 'other', { relationship: 'Son' });
   assert.equal(records.get('households/H-DELACRUZ').members.length, 3);
   assert.equal(records.get('users/other').householdId, null);
-  await decideMembership(db, request.id, 'juan', true);
+  await decideMembership(db, request.id, 'juan', true, true);
   const member = records.get('households/H-DELACRUZ').members.at(-1);
   assert.deepEqual(member, { id: 'other', userId: 'other', name: 'Another resident', relationship: 'Son' });
   assert.equal(records.get('households/H-DELACRUZ').members.length, 4);
@@ -65,13 +65,13 @@ test('rejection clears the pending request without modifying household members',
   assert.equal(records.get('users/maria').householdId, null);
   assert.equal(records.get('users/maria').pendingHouseholdRequestId, null);
   assert.equal(records.get(`householdRequests/${request.id}`).status, 'Rejected');
-  await assert.rejects(decideMembership(db, request.id, 'juan', true), /already been decided/);
+  await assert.rejects(decideMembership(db, request.id, 'juan', true, true), /already been decided/);
 });
 
 test('two residents racing for one member produce one link and one rejected conflict', async () => {
   const { db, records } = householdStore();
   const requests = await Promise.all([link(db), link(db, 'other')]);
-  const outcomes = await Promise.all(requests.map(request => decideMembership(db, request.id, 'juan', true)));
+  const outcomes = await Promise.all(requests.map(request => decideMembership(db, request.id, 'juan', true, true)));
   assert.deepEqual(outcomes.map(result => result.status).sort(), ['Approved', 'Rejected']);
   assert.match(outcomes.find(result => result.conflict).message, /already been linked/);
   const members = records.get('households/H-DELACRUZ').members;
@@ -85,10 +85,10 @@ test('duplicate pending requests and joins to multiple households are blocked', 
   records.set('households/H-SECOND', { ...household, createdBy: 'second-head', memberUids: ['second-head'], members: [{ id: 'head', userId: 'second-head', name: 'Head', relationship: 'Head' }] });
   const results = await Promise.allSettled([link(db), link(db)]);
   assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
-  await assert.rejects(requestMembership(db, 'H-SECOND', 'maria', { requestType: 'add_new', relationship: 'Child' }), /pending approval/);
+  await assert.rejects(requestMembership(db, 'H-SECOND', 'maria', { relationship: 'Child' }), /pending approval/);
   const request = results.find(result => result.status === 'fulfilled').value;
-  await decideMembership(db, request.id, 'juan', true);
-  await assert.rejects(requestMembership(db, 'H-SECOND', 'maria', { requestType: 'add_new', relationship: 'Child' }), /already belongs/);
+  await decideMembership(db, request.id, 'juan', true, true);
+  await assert.rejects(requestMembership(db, 'H-SECOND', 'maria', { relationship: 'Child' }), /already belongs/);
 });
 
 test('linking during an active evacuation preserves every attendance field and the selected member ID', async () => {
@@ -99,7 +99,7 @@ test('linking during an active evacuation preserves every attendance field and t
   records.set('activeEvacuations/H-DELACRUZ', active);
   records.set('evacuationCenters/center', { occupied: 1, capacity: 20 });
   const request = await link(db);
-  await decideMembership(db, request.id, 'juan', true);
+  await decideMembership(db, request.id, 'juan', true, true);
   assert.deepEqual(records.get('evacuationRecords/history'), attendance);
   assert.deepEqual(records.get('activeEvacuations/H-DELACRUZ'), active);
   assert.equal(records.get('evacuationCenters/center').occupied, 1);
@@ -131,4 +131,17 @@ test('household creation links only the head and keeps same-named people as sepa
   assert.equal(household.members.length, 2);
   assert.equal(household.members[1].userId, undefined);
   await assert.rejects(createResidentHousehold(db, 'other', { name: 'Again', street: 'Wawa', contact: '09123456789', members: household.members }), /already belongs/);
+});
+
+test('existing-member approval requires explicit head identity confirmation and retains old pending requests', async () => {
+  const { db, records } = householdStore();
+  const request = await link(db);
+  assert.equal(records.get(`householdRequests/${request.id}`).requestType, undefined);
+  await assert.rejects(decideMembership(db, request.id, 'juan', true), /Confirm the requesting resident/);
+  assert.equal(records.get(`householdRequests/${request.id}`).status, 'Pending');
+  assert.equal(records.get('households/H-DELACRUZ').members[1].userId, undefined);
+  records.get(`householdRequests/${request.id}`).requestType = 'link_existing';
+  await decideMembership(db, request.id, 'juan', true, true);
+  assert.equal(records.get('households/H-DELACRUZ').members.length, 3);
+  assert.equal(records.get(`householdRequests/${request.id}`).identityConfirmedBy, 'juan');
 });

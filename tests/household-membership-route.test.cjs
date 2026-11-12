@@ -22,12 +22,17 @@ test('authenticated preview, linking request and head decision use the real memb
     const data = (await preview.json()).data;
     assert.equal(preview.status, 200); assert.equal(data.members.length, 3);
     assert.equal(data.contact, undefined); assert.equal(data.street, undefined); assert.equal(data.members[0].userId, undefined);
-    const created = await post('/join', 'maria', { reference: 'HH-00001', requestType: 'link_existing', memberId: 'manual-maria', userId: 'other' });
+    const qr = await post('/preview', 'maria', { reference: JSON.stringify({ app: 'ligtas', version: 1, householdId: 'H-DELACRUZ' }) });
+    assert.equal(qr.status, 200);
+    assert.deepEqual((await qr.json()).data, data);
+    const created = await post('/join', 'maria', { reference: 'HH-00001', memberId: 'manual-maria', userId: 'other' });
     assert.equal(created.status, 201);
     const request = (await created.json()).data;
     assert.equal(records.get(`householdRequests/${request.id}`).userId, 'maria');
     assert.equal((await post(`/requests/${request.id}/decision`, 'other', { approve: true })).status, 403);
-    assert.equal((await post(`/requests/${request.id}/decision`, 'juan', { approve: true })).status, 200);
+    assert.equal((await post(`/requests/${request.id}/decision`, 'juan', { approve: true })).status, 400);
+    assert.equal(records.get('households/H-DELACRUZ').members[1].userId, undefined);
+    assert.equal((await post(`/requests/${request.id}/decision`, 'juan', { approve: true, identityConfirmed: true })).status, 200);
     assert.equal(records.get('households/H-DELACRUZ').members.length, 3);
     assert.equal(records.get('households/H-DELACRUZ').members[1].userId, 'maria');
   } finally { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }

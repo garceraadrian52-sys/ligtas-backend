@@ -8,8 +8,6 @@ export class MembershipError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
 }
 
-type RequestType = 'link_existing' | 'add_new';
-
 function requiredText(value: unknown, label: string, limit = 120): string {
   if (typeof value !== 'string' || !value.trim() || value.trim().length > limit) {
     throw new MembershipError(`Enter ${label} (up to ${limit} characters).`);
@@ -87,10 +85,9 @@ async function assertUnassigned(transaction: Transaction, db: Firestore, uid: st
 }
 
 export async function requestMembership(db: Firestore, id: string, uid: string, input: any) {
-  const requestType: RequestType = input?.requestType;
-  if (!['link_existing', 'add_new'].includes(requestType)) throw new MembershipError('Choose Link Existing Member or Add New Member.');
-  const memberId = requestType === 'link_existing' ? requiredText(input.memberId, 'your selected member ID', 128) : null;
-  const relationship = requestType === 'add_new' ? requiredText(input.relationship, 'your relationship to the household head') : null;
+  const memberId = input?.memberId != null ? requiredText(input.memberId, 'your selected member ID', 128) : null;
+  if (input?.requestType === 'link_existing' && !memberId) throw new MembershipError('Select your household member record.');
+  const relationship = memberId ? null : requiredText(input?.relationship, 'your relationship to the household head');
   const ref = db.collection('householdRequests').doc();
   await db.runTransaction(async transaction => {
     const profileRef = db.doc(`users/${uid}`);
@@ -111,7 +108,7 @@ export async function requestMembership(db: Firestore, id: string, uid: string, 
     if (!selected && members.length >= 100) throw new MembershipError('This household already has 100 members.', 409);
     transaction.create(ref, {
       householdId: id, userId: uid, name: requiredText(profile!.name ?? profile!.displayName, 'your registered name'),
-      requestType, memberId, selectedMemberName: selected?.name ?? null,
+      memberId, selectedMemberName: selected?.name ?? null,
       relationship: selected ? String(selected.relationship ?? 'Not specified') : relationship,
       status: 'Pending', requestVersion: ref.id, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp(),
     });
@@ -120,7 +117,7 @@ export async function requestMembership(db: Firestore, id: string, uid: string, 
   return { id: ref.id, status: 'Pending' };
 }
 
-export async function decideMembership(db: Firestore, requestId: string, headUid: string, approve: boolean) {
+export async function decideMembership(db: Firestore, requestId: string, headUid: string, approve: boolean, identityConfirmed = false) {
   return db.runTransaction(async transaction => {
     const requestRef = db.doc(`householdRequests/${requestId}`);
     const request = (await transaction.get(requestRef)).data();
@@ -137,6 +134,7 @@ export async function decideMembership(db: Firestore, requestId: string, headUid
     const applicant = (await transaction.get(applicantRef)).data();
     const finish = (status: 'Approved' | 'Rejected', reason?: string, memberId?: string) => {
       transaction.update(requestRef, { status, decidedBy: headUid, decidedByName: String(head!.name ?? head!.displayName ?? 'Household head'),
+        ...(status === 'Approved' && request.memberId ? { identityConfirmedBy: headUid, identityConfirmedAt: FieldValue.serverTimestamp() } : {}),
         decisionReason: reason ?? null, decidedAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() });
       const pendingMatches = applicant && (applicant.pendingHouseholdRequestId === requestId
         || (!applicant.pendingHouseholdRequestId && applicant.pendingHouseholdId === request.householdId));
@@ -159,10 +157,11 @@ export async function decideMembership(db: Firestore, requestId: string, headUid
     if (members.some(member => memberAccountId(member, household) === request.userId)) return finish('Rejected', 'This account is already linked to a member.');
     let nextMembers: any[];
     let memberId: string;
-    if (request.requestType === 'link_existing') {
+    if (request.memberId || request.requestType === 'link_existing') {
       const selected = members.find(member => member.id === request.memberId);
       if (!selected) return finish('Rejected', 'The selected member is no longer listed.');
       if (memberAccountId(selected, household)) return finish('Rejected', 'The selected member has already been linked to another account.');
+      if (identityConfirmed !== true) throw new MembershipError('Confirm the requesting resident is the selected household member before approving.');
       memberId = selected.id;
       // Only account metadata changes. Attendance continues referencing exactly the same member ID.
       nextMembers = members.map(member => member.id === memberId ? { ...member, userId: request.userId } : member);
