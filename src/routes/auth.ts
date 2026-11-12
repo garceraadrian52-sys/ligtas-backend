@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
+import { auditActor, logAction } from '../services/auditLog';
 import { auth, db } from '../config/firebaseAdmin';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { normalizeRole } from '../services/roles';
@@ -45,6 +47,7 @@ router.post('/forgot-password', async (req, res) => {
       console.error('Firebase password reset request failed:', providerError || response.status);
       return res.status(503).json({ error: 'Password reset is temporarily unavailable. Please try again later.' });
     }
+    await logAction({actorId:'',actorName:'Not recorded',actorRole:'UNAUTHENTICATED',action:'password_reset_requested',targetType:'user',targetId:'',details:{source:'authentication_provider'}});
     return res.status(202).json({ data: { accepted: true } });
   } catch (error) {
     console.error('Password reset request failed:', error);
@@ -53,7 +56,7 @@ router.post('/forgot-password', async (req, res) => {
   }
 });
 
-router.post('/login', async (req, res) => {
+router.post(['/login','/mobile-login'], async (req, res) => {
   const { identifier, email: emailField, password } = req.body ?? {};
   const email = identifier ?? emailField;
 
@@ -90,13 +93,15 @@ router.post('/login', async (req, res) => {
     }
 
     const role = normalizeRole(profile.role);
-    if (!['LGU_ADMIN', 'SUPER_ADMIN'].includes(role)) {
+    if (profile.disabled === true) return res.status(403).json({error:'This account has been deactivated.'});
+    const mobile=req.path === '/mobile-login';
+    if (!mobile && !['LGU_ADMIN', 'SUPER_ADMIN'].includes(role)) {
       return res.status(403).json({ error: 'Only Super Admin or LGU/MDRRMO personnel can access the LigTAS web dashboard.' });
     }
 
     try {
       const verifiedToken = await auth.verifyIdToken(signInData.idToken);
-      if (verifiedToken.uid === uid) await recordAuthenticatedLogin(uid, verifiedToken.auth_time);
+      if (!mobile && verifiedToken.uid === uid) await recordAuthenticatedLogin(uid, verifiedToken.auth_time);
     } catch (activityError: any) {
       // Keep a valid sign-in available if activity logging is temporarily unavailable.
       console.error('Record web login failed:', activityError?.code ?? 'unknown');
@@ -104,7 +109,7 @@ router.post('/login', async (req, res) => {
 
     return res.json({
       data: {
-        token: signInData.idToken,
+        token: mobile ? await auth.createCustomToken(uid) : signInData.idToken,
         user: {
           id: uid,
           name: profile.name ?? profile.displayName ?? '',
@@ -121,4 +126,11 @@ router.post('/login', async (req, res) => {
   }
 });
 
+router.post('/logout',requireAuth,async(req:AuthenticatedRequest,res)=>{
+  try {
+    await auth.revokeRefreshTokens(req.user!.uid);
+    await logAction({...auditActor(req.user!),action:'logout',targetType:'user',targetId:req.user!.uid,eventId:'logout:'+req.user!.uid+':'+req.user!.authTime});
+    res.status(204).end();
+  } catch {res.status(503).json({error:'Unable to end the server session.'});}
+});
 export default router;

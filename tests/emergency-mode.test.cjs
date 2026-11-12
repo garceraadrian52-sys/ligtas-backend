@@ -12,7 +12,9 @@ let mode;
 let writes = 0;
 let transactionQueue = Promise.resolve();
 
+const audit = [];
 const db = {
+  collection(name) { assert.equal(name,'auditLogs'); return {doc:()=>({path:'auditLogs/test'})}; },
   doc(path) {
     return {
       path,
@@ -33,6 +35,7 @@ const db = {
     try {
       let staged;
       const result = await update({
+        create(_ref,value) { audit.push(value); },
         async get() { return { exists: Boolean(mode), data: () => mode ? { ...mode } : undefined }; },
         set(_ref, value, options) {
           assert.deepEqual(options, { merge: true });

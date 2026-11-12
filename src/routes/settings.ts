@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
-import { logAction } from '../services/auditLog';
+import { auditActor, logAction } from '../services/auditLog';
 import { areNotificationWorkersStarted } from '../services/notificationWorker';
 
 const router = Router();
@@ -89,7 +89,10 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
 
   try {
     const ref = db.doc(`userSettings/${req.user!.uid}`);
+    const previous=(await ref.get()).data() || {};
+    const changedFields=Object.keys(updates).filter(key=>JSON.stringify(previous[key])!==JSON.stringify(updates[key]));
     await ref.set({ ...updates, updatedAt: new Date() }, { merge: true });
+    if(changedFields.length) await logAction({...auditActor(req.user!),action:'settings_updated',targetType:'settings',targetId:req.user!.uid,details:{changedFields}});
     const snapshot = await ref.get();
     const stored = snapshot.data() ?? {};
     res.json({ data: {
@@ -136,7 +139,7 @@ router.post('/backup', async (req: AuthenticatedRequest, res) => {
     };
     await db.doc('systemSettings/backupStatus').set(summary, { merge: true });
     await logAction({
-      actorId: req.user!.uid, actorName: req.user!.name, actorRole: req.user!.role, actorEmail: req.user!.email,
+      actorId: req.user!.uid, actorName: req.user!.name, actorRole: req.user!.role, actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
       action: 'partial_backup_exported', targetType: 'system', targetId: 'partial-backup',
       details: { collections: summary.collections },
     }).catch(error => console.error('Record partial backup export audit failed:', error));

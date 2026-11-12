@@ -72,9 +72,13 @@ test('a newly published barangay alert queues one eligible device delivery and d
   assert.equal(jobs.size, 3);
   const alert = {
     id: 'firestore-alert-id', ref: { path: 'alerts/firestore-alert-id' },
-    data: () => ({ displayId: 'ALT0001', status: 'active', category: 'Flood Warning', title: 'Flooding',
+    data: () => ({ displayId: 'ALT0001', status: 'published', category: 'Flood Warning', title: 'Flooding',
       message: 'Water is rising', coverageArea: 'barangay', barangayId: 'barangay_dalig', publishedAt }),
   };
+  const draft = { ...alert, data: () => ({ ...alert.data(), status: 'draft', publishedAt: null }) };
+  await callbacks.get('alerts')({ docs: [draft], size: 1, docChanges: () => [{ type: 'added', doc: draft }] });
+  await callbacks.get('alerts')({ docs: [draft], size: 1, docChanges: () => [{ type: 'modified', doc: draft }] });
+  assert.equal(jobs.size, 3, 'draft creation and editing must queue no inbox or push delivery');
   const added = { docs: [alert], size: 1, docChanges: () => [{ type: 'added', doc: alert }] };
   await callbacks.get('alerts')(added);
   await callbacks.get('alerts')({ docs: [alert], size: 1, docChanges: () => [{ type: 'modified', doc: alert }] });

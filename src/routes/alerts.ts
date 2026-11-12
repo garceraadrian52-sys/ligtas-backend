@@ -55,11 +55,11 @@ function defaultRecommendations(category: string) {
 }
 
 // GET /alerts — lahat ng officials (LGU at Barangay) ay makikita lahat
-router.get('/', async (_req: AuthenticatedRequest, res) => {
+router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
     const snapshot = await db.collection('alerts').orderBy('createdAt', 'desc').get();
     const alerts = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-    res.json({ data: alerts });
+    res.json({ data: alerts.filter((alert: any) => alert.status !== 'draft' || isMunicipalityAdmin(req.user!.role)) });
   } catch (error) {
     console.error('List alerts failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;
@@ -100,7 +100,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       message: String(message).trim(),
       description: String(message).trim(),
       source: 'LGU/MDRRMO',
-      status: publish ? 'active' : 'draft',
+      status: publish ? 'published' : 'draft',
       coverageArea: validBarangayIds.length ? 'barangay' : 'municipality',
       barangayId: validBarangayIds[0] ?? null,
       affectedAreas,
@@ -125,7 +125,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       actorId: req.user!.uid,
       actorName: req.user!.name,
       actorRole: req.user!.role,
-      actorEmail: req.user!.email,
+      actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
       action: publish ? 'alert_created_and_published' : 'alert_created_draft',
       targetType: 'alert',
       targetId: docRef.id,
@@ -156,7 +156,7 @@ router.patch('/:id/publish', async (req: AuthenticatedRequest, res) => {
       if (status === 'active' || status === 'published') return { changed: false, data };
       if (status !== 'draft') throw new Error('INVALID_STATE');
       const now = new Date();
-      const updates = { status: 'active', publishedAt: now, updatedAt: now };
+      const updates = { status: 'published', publishedAt: now, updatedAt: now };
       transaction.update(alertRef, updates);
       return { changed: true, data: { ...data, ...updates } };
     });
@@ -168,7 +168,7 @@ router.patch('/:id/publish', async (req: AuthenticatedRequest, res) => {
       actorId: req.user!.uid,
       actorName: req.user!.name,
       actorRole: req.user!.role,
-      actorEmail: req.user!.email,
+      actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
       action: 'alert_published',
       targetType: 'alert',
       targetId: updated.id,
@@ -184,5 +184,62 @@ router.patch('/:id/publish', async (req: AuthenticatedRequest, res) => {
     res.status(500).json({ error: 'Failed to publish alert.' });
   }
 });
+
+router.patch('/:id', async (req: AuthenticatedRequest, res) => {
+  if (!isMunicipalityAdmin(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can edit drafts.' });
+  }
+  const { category, priority, title, message, barangayIds } = req.body ?? {};
+  if (![category, title, message].every(value => typeof value === 'string' && value.trim())
+    || !['Critical', 'High', 'Normal'].includes(priority)
+    || title.length > 160 || message.length > 5000 || category.length > 100
+    || !Array.isArray(barangayIds)
+    || barangayIds.some(id => typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(barangayNames, id))) {
+    return res.status(400).json({ error: 'Enter valid alert content and target areas.' });
+  }
+  const ids = Array.from(new Set<string>(barangayIds));
+  return changeDraft(req, res, {
+    category, alertType: category, priority, severityLevel: priority,
+    title: title.trim(), message: message.trim(), description: message.trim(),
+    coverageArea: ids.length ? 'barangay' : 'municipality', barangayId: ids[0] ?? null,
+    affectedAreas: ids.length ? ids.map(id => barangayNames[id]) : ['All barangays in Balagtas'],
+    locationScope: { type: ids.length ? 'barangay' : 'municipality', barangayIds: ids },
+    recommendations: defaultRecommendations(category), updatedAt: new Date(),
+  });
+});
+
+router.delete('/:id', async (req: AuthenticatedRequest, res) => {
+  if (!isMunicipalityAdmin(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can delete drafts.' });
+  }
+  return changeDraft(req, res);
+});
+
+// Check status inside the transaction to prevent edits/deletion racing publication.
+async function changeDraft(req: AuthenticatedRequest, res: import('express').Response, updates?: Record<string, unknown>) {
+  try {
+    const ref = db.doc('alerts/' + req.params.id);
+    const data = await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists) throw new Error('NOT_FOUND');
+      if (snapshot.data()!.status !== 'draft') throw new Error('INVALID_STATE');
+      if (updates) transaction.update(ref, updates);
+      else transaction.delete(ref);
+      return { ...snapshot.data(), ...updates, id: ref.id };
+    });
+    await logAction({
+      actorId: req.user!.uid, actorName: req.user!.name, actorRole: req.user!.role,
+      actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
+      action: updates ? 'alert_draft_updated' : 'alert_draft_deleted', targetType: 'alert', targetId: ref.id,
+    });
+    return res.json({ data: updates ? data : { id: ref.id } });
+  } catch (error: any) {
+    if (error.message === 'NOT_FOUND') return res.status(404).json({ error: 'Alert not found.' });
+    if (error.message === 'INVALID_STATE') return res.status(409).json({ error: 'Only drafts can be edited or deleted.' });
+    console.error('Draft update failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    return res.status(500).json({ error: 'Failed to update draft.' });
+  }
+}
 
 export default router;

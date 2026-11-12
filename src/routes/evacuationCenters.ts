@@ -137,8 +137,10 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     const displayId = await db.runTransaction(async (transaction) => {
       const displayId = await allocateDisplayId(transaction, db, 'evacuationCenters');
       transaction.create(docRef, { ...centerData, displayId });
+      logActionInTransaction(transaction,{actorId:req.user!.uid,actorName:req.user!.name,actorRole:req.user!.role,actorBarangayId:req.user!.barangayId,action:'evacuation_center_created',targetType:'evacuationCenter',targetId:docRef.id,details:{displayId,capacity:centerData.capacity}});
       return displayId;
     });
+    invalidateFirestoreReadCache('auditLogs:');
     res.status(201).json({ data: { id: docRef.id, ...centerData, displayId } });
   } catch (error) {
     console.error('Create evacuation center failed:', error);
@@ -261,7 +263,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
         actorId: req.user!.uid,
         actorName: req.user!.name,
         actorRole: req.user!.role,
-        actorEmail: req.user!.email,
+        actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
         action: 'evacuation_center_updated',
         targetType: 'evacuationCenter',
         targetId: centerId,

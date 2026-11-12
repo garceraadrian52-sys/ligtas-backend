@@ -58,7 +58,7 @@ async function writeAudit(req: AuthenticatedRequest, action: string, targetId: s
     actorId: req.user!.uid,
     actorName: req.user!.name,
     actorRole: req.user!.role,
-    actorEmail: req.user!.email,
+    actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
     action,
     targetType: 'user',
     targetId,
@@ -310,7 +310,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
             actorId: req.user!.uid,
             actorName: req.user!.name,
             actorRole: req.user!.role,
-            actorEmail: req.user!.email,
+            actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
             action: 'user_created',
             targetType: 'user',
             targetId: userRecord.uid,
@@ -384,6 +384,33 @@ router.post('/:userId/password-reset', async (req: AuthenticatedRequest, res) =>
   }
 });
 
+// Status-only deactivation preserves profiles, report ownership, and account roles.
+router.patch('/:userId/status', async (req: AuthenticatedRequest, res) => {
+  if (!['SUPER_ADMIN', 'LGU_ADMIN'].includes(req.user!.role)) return res.status(403).json({ error: 'Only municipality administrators can deactivate accounts.' });
+  const userId = req.params.userId;
+  if (!validDocumentId(userId)) return res.status(400).json({ error: 'Invalid user ID.' });
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || body.disabled !== true) return res.status(400).json({ error: 'Only account deactivation is accepted. Send disabled: true.' });
+  if (userId === req.user!.uid) return res.status(400).json({ error: 'You cannot deactivate your own account.' });
+  try {
+    const userRef = db.doc('users/' + userId);
+    const snapshot = await userRef.get();
+    if (!snapshot.exists) return res.status(404).json({ error: 'User not found.' });
+    const current = snapshot.data()!;
+    const role = directoryRole(current.role);
+    if (role !== 'RESIDENT' && !(role === 'BARANGAY_OFFICIAL' && req.user!.role === 'SUPER_ADMIN')) return res.status(403).json({ error: 'You cannot deactivate this account from this action.' });
+    await auth.updateUser(userId, { disabled: true });
+    await auth.revokeRefreshTokens(userId);
+    await userRef.update({ disabled: true, updatedAt: new Date() });
+    await writeAudit(req, 'user_deactivated', userId, { role, previouslyDisabled: current.disabled === true });
+    res.json({ data: { id: userId, disabled: true } });
+  } catch (error) {
+    console.error('Deactivate user failed:', error);
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    res.status(500).json({ error: 'Failed to deactivate account. Please retry.' });
+  }
+});
+
 // PATCH /users/:userId — account permissions and status are controlled by Super Admin.
 router.patch('/:userId', async (req: AuthenticatedRequest, res) => {
   if (req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Only Super Admin can edit system accounts.' });
@@ -427,7 +454,7 @@ router.patch('/:userId', async (req: AuthenticatedRequest, res) => {
     if (disabled !== undefined) authUpdates.disabled = disabled;
     if (Object.keys(authUpdates).length) await auth.updateUser(userId, authUpdates);
     await userRef.update(updates);
-    await writeAudit(req, 'user_updated', userId, { email: current.email, previousRole: current.role, role: nextRole, disabled: disabled ?? current.disabled ?? false, barangayId: nextBarangay ?? null });
+    await writeAudit(req, nextRole !== current.role ? 'user_role_changed' : disabled === true && current.disabled !== true ? 'user_deactivated' : disabled === false && current.disabled === true ? 'user_activated' : 'user_updated', userId, { email: current.email, previousRole: current.role, role: nextRole, disabled: disabled ?? current.disabled ?? false, barangayId: nextBarangay ?? null });
     const updated = await userRef.get();
     res.json({ data: { id: updated.id, ...updated.data() } });
   } catch (error) {
@@ -450,7 +477,7 @@ router.delete('/:userId', async (req: AuthenticatedRequest, res) => {
     if (!snapshot.exists) return res.status(404).json({ error: 'User not found.' });
     const data = snapshot.data()!;
     const role = normalizeRole(data.role) as AccountRole;
-    if (!accountRoles.includes(role)) return res.status(403).json({ error: 'Resident accounts are not deleted from this directory.' });
+    if (!['SUPER_ADMIN', 'LGU_ADMIN'].includes(role)) return res.status(403).json({ error: 'Resident and Barangay Official accounts must be deactivated instead of deleted.' });
     if (role === 'SUPER_ADMIN' && await countOtherActiveSuperAdmins(userId) === 0) return res.status(409).json({ error: 'Keep at least one active Super Admin account.' });
     await auth.deleteUser(userId);
     await userRef.delete();

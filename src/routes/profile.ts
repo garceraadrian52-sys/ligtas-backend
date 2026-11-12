@@ -1,3 +1,4 @@
+import { auditActor, logAction } from '../services/auditLog';
 import { Router, type Response } from 'express';
 import { auth, db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
@@ -140,6 +141,7 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
     if (Object.keys(authUpdates).length) await auth.updateUser(req.user!.uid, authUpdates);
 
     await db.doc(`users/${req.user!.uid}`).update(updates);
+    await logAction({...auditActor(req.user!),action:'profile_updated',targetType:'user',targetId:req.user!.uid,details:{changedFields:Object.keys(updates).filter(key=>key!=='updatedAt')}});
     res.json({ data: { id: req.user!.uid, ...req.profile!, ...updates, email: req.profile?.email ?? req.user!.email, role: req.user!.role } });
   } catch (error) {
     console.error('Update profile failed:', error);
@@ -202,7 +204,7 @@ router.post('/email/sync', async (req: AuthenticatedRequest, res) => {
 // PATCH /profile/password. The current password creates a fresh Firebase Auth token before update.
 router.patch('/password', async (req: AuthenticatedRequest, res) => {
   const { currentPassword, newPassword } = req.body ?? {};
-  if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 4096) {
+  if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < (isMunicipalityAdmin(req.user!.role) ? 12 : 8) || newPassword.length > 4096) {
     return res.status(400).json({ error: 'Enter your current password and a new password with at least 12 characters.' });
   }
   if (!process.env.FIREBASE_WEB_API_KEY) return res.status(503).json({ error: 'Password changes are temporarily unavailable.' });
@@ -213,6 +215,7 @@ router.patch('/password', async (req: AuthenticatedRequest, res) => {
     if (result.localId !== req.user!.uid || typeof result.idToken !== 'string') {
       return res.status(503).json({ error: 'Firebase did not confirm the password update.' });
     }
+    await logAction({...auditActor(req.user!),action:'password_changed',targetType:'user',targetId:req.user!.uid});
     res.json({ data: { updated: true, token: result.idToken } });
   } catch (error: any) {
     if (error instanceof IdentityToolkitError && error.providerCode === 'WEAK_PASSWORD') {

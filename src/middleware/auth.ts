@@ -21,6 +21,7 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     const profileSnap = await db.doc(`users/${decoded.uid}`).get();
     const profile = profileSnap.data();
     if (!profile) return res.status(401).json({ error: 'User profile not found.' });
+    if (profile.disabled === true) return res.status(403).json({ error: 'This account has been deactivated.' });
 
     const role = normalizeRole(profile.role);
     req.user = {
