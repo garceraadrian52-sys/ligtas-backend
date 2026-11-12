@@ -11,6 +11,8 @@ test('a newly published barangay alert queues one eligible device delivery and d
     { id: 'super-admin', data: () => ({ role: 'SUPER_ADMIN', barangayId: null }) },
     { id: 'resident-dalig', data: () => ({ role: 'RESIDENT', barangayId: 'barangay_dalig' }) },
     { id: 'resident-wawa', data: () => ({ role: 'RESIDENT', barangayId: 'barangay_wawa' }) },
+    { id: 'disabled-resident', data: () => ({ role: 'RESIDENT', disabled: true }) },
+    { id: 'opted-out', data: () => ({ role: 'RESIDENT', notificationPreferences: { 'Flood Alerts': false } }) },
   ];
   const administrators = [{ id: 'super-admin', data: () => ({ role: 'SUPER_ADMIN' }) }];
   const devicesByPath = new Map(profiles.map(user => [
@@ -46,7 +48,7 @@ test('a newly published barangay alert queues one eligible device delivery and d
     return query;
   }
 
-  const db = { collection, doc: path => ({ path, id: path.split('/').at(-1) }) };
+  const db = { collection, doc: path => ({ path, id: path.split('/').at(-1), onSnapshot(callback) { callbacks.set(path, callback); } }) };
   const exports = {};
   vm.runInNewContext(readFileSync(require.resolve('../dist/services/notificationWorker'), 'utf8'), {
     exports, setInterval: () => 0, console: { log() {}, error() {} }, Date,
@@ -91,6 +93,27 @@ test('a newly published barangay alert queues one eligible device delivery and d
   const inbox = [...jobs.values()].filter(job => job.state === 'inbox');
   assert.equal(inbox.length, 2);
   assert.ok(inbox.every(job => job.userId === 'super-admin' && job.targetPath === '/Alerts_Management'));
+  const mode = { active: true, revision: 1, changedAt: new Date() };
+  await callbacks.get('systemSettings/emergencyMode')({ data: () => mode });
+  const emergency = [...jobs.values()].filter(job => job.kind === 'emergency');
+  assert.equal(emergency.length, 2);
+  assert.deepEqual(emergency.map(job => job.userId).sort(), ['resident-dalig', 'resident-wawa']);
+  assert.ok(emergency.every(job => job.sourcePath === 'systemSettings/emergencyMode' && job.title === 'Emergency mode activated'));
+  await callbacks.get('systemSettings/emergencyMode')({ data: () => mode });
+  assert.equal([...jobs.values()].filter(job => job.kind === 'emergency').length, 2);
+  await callbacks.get('systemSettings/emergencyMode')({ data: () => ({ ...mode, active: false, revision: 2 }) });
+  assert.equal([...jobs.values()].filter(job => job.kind === 'emergency').length, 2);
+});
+
+test('emergency deliveries require a current active revision and resident recipient', () => {
+  const changedAt = new Date('2026-11-12T00:00:00Z');
+  const mode = { active: true, revision: 3, changedAt };
+  const job = { revision: policy.emergencyModeRevision(mode) };
+  assert.equal(policy.emergencyModeRevision({ ...mode, changedAt: { toMillis: () => changedAt.getTime() } }), job.revision);
+  assert.equal(policy.emergencyDeliveryCurrent(job, mode, { role: 'RESIDENT' }), true);
+  assert.equal(policy.emergencyDeliveryCurrent(job, { ...mode, active: false }, { role: 'RESIDENT' }), false);
+  assert.equal(policy.emergencyDeliveryCurrent(job, { ...mode, revision: 4 }, { role: 'RESIDENT' }), false);
+  assert.equal(policy.emergencyDeliveryCurrent(job, mode, { role: 'LGU_ADMIN' }), false);
 });
 
 test('Super Admin receives municipality scoped alert eligibility', () => {

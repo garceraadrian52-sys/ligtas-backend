@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Timestamp, FieldValue, type DocumentReference } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
-import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision } from './notificationPolicy';
+import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision, emergencyModeRevision, emergencyDeliveryCurrent } from './notificationPolicy';
 import { assignDisplayIdIfMissing } from './recordDisplayIds';
 import { MUNICIPAL_ADMIN_ROLE_VALUES, normalizeRole } from './roles';
 
@@ -89,6 +89,34 @@ async function notifyAdmins(kind: string, targetId: string, displayId: string | 
 }
 
 // --- Watchers (kapalit ng onDocumentWritten Cloud Function triggers) ---
+
+function startEmergencyModeWatcher() {
+  const ref = db.doc('systemSettings/emergencyMode');
+  ref.onSnapshot(async snapshot => {
+    const mode = snapshot.data();
+    if (mode?.active !== true) return;
+    const revision = emergencyModeRevision(mode);
+    try {
+      let cursor;
+      while (true) {
+        let query: FirebaseFirestore.Query = db.collection('users').orderBy('__name__').limit(200);
+        if (cursor) query = query.startAfter(cursor);
+        const page = await query.get();
+        for (const user of page.docs) {
+          const profile = user.data();
+          if (normalizeRole(profile.role) !== 'RESIDENT') continue;
+          await queueForUser(user.id, {
+            kind: 'emergency', targetId: 'emergencyMode', sourcePath: ref.path, revision,
+            title: 'Emergency mode activated',
+            body: 'LGU/MDRRMO personnel activated emergency mode. Open LigTAS for evacuation centers, alerts and emergency contacts.',
+          }, `emergency:${revision}`, profile);
+        }
+        if (page.size < 200) break;
+        cursor = page.docs[page.docs.length - 1];
+      }
+    } catch (error) { console.error('Queue emergency activation notifications failed:', error); }
+  }, error => console.error('Emergency activation watcher failed:', error));
+}
 
 const alertCache = new Map<string, any>();
 let alertsReady = false;
@@ -299,7 +327,9 @@ async function processDelivery(ref: DocumentReference) {
 
     if (!user || !source || !enabled(user, job.kind) || !device?.enabled) return finish(ref, 'skipped');
     if (['alert', 'evacuation'].includes(job.kind) && (!published(source) || !inArea(source, user))) return finish(ref, 'skipped');
-    if (job.revision && job.revision !== alertRevision(job.targetId, source)) return finish(ref, 'superseded');
+    if (job.kind === 'emergency') {
+      if (!emergencyDeliveryCurrent(job, source, user)) return finish(ref, 'superseded');
+    } else if (job.revision && job.revision !== alertRevision(job.targetId, source)) return finish(ref, 'superseded');
     if (job.kind === 'report' && (source.reporterId !== job.userId || String(source.verification ?? source.status).toLowerCase() !== job.expectedStatus)) return finish(ref, 'skipped');
     if (job.kind === 'household' && (source.userId !== job.userId || source.status !== job.expectedStatus)) return finish(ref, 'skipped');
     if (!/^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/.test(device.token)) return finish(ref, 'failed', 'Invalid device token');
@@ -366,6 +396,7 @@ export function startNotificationWorkers(onAlertsReady?: () => void) {
   if (notificationWorkersStarted) return;
   notificationWorkersStarted = true;
   startAlertWatcher(onAlertsReady);
+  startEmergencyModeWatcher();
   startReportWatcher();
   startHouseholdRequestWatcher();
   startDeliveryWorker();

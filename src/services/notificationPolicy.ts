@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isMunicipalityAdmin } from './roles';
+import { isMunicipalityAdmin, normalizeRole } from './roles';
 
 function normalize(value: unknown) {
   return String(value ?? '')
@@ -30,7 +30,7 @@ export function kindForAlert(data: any) {
 
 export function enabled(user: any, kind: string) {
   if (user.disabled === true) return false;
-  const key = ({ alert: 'Flood Alerts', evacuation: 'Evacuation Updates', report: 'Report Updates', household: 'Household Updates' } as Record<string, string>)[kind];
+  const key = ({ alert: 'Flood Alerts', emergency: 'Flood Alerts', evacuation: 'Evacuation Updates', report: 'Report Updates', household: 'Household Updates' } as Record<string, string>)[kind];
   return user.notificationPreferences?.[key] !== false;
 }
 
@@ -48,4 +48,14 @@ export function alertRevision(id: string, alert: any) {
     alert.coverageArea ?? null, scope, alert.barangayIds ?? null,
     alert.barangayId ?? null, alert.publishedAt ?? null, alert.expiresAt ?? null];
   return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
+}
+
+export function emergencyModeRevision(mode: any) {
+  const value = mode?.changedAt;
+  const time = value?.toMillis?.() ?? (value instanceof Date ? value.getTime() : typeof value === 'string' ? Date.parse(value) : null);
+  return createHash('sha256').update(JSON.stringify([mode?.revision ?? 0, Number.isFinite(time) ? time : null])).digest('hex');
+}
+
+export function emergencyDeliveryCurrent(job: any, mode: any, user: any) {
+  return normalizeRole(user?.role) === 'RESIDENT' && mode?.active === true && job.revision === emergencyModeRevision(mode);
 }

@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { allocateDisplayId, assignDisplayIdIfMissing } = require('../dist/services/recordDisplayIds');
+const { ensureHouseholdReference } = require('../dist/services/householdReferenceAssignment');
 
 function memoryFirestore() {
   const documents = new Map();
@@ -32,6 +33,22 @@ function memoryFirestore() {
   };
   return { db, documents };
 }
+
+test('residents can recover a missing household reference after creation and concurrent requests preserve it', async () => {
+  const { db, documents } = memoryFirestore();
+  documents.set('households/H-ABCDE', { createdBy: 'owner', memberUids: ['owner', 'member'] });
+  const ids = await Promise.all([
+    ensureHouseholdReference(db, 'H-ABCDE', 'owner'), ensureHouseholdReference(db, 'H-ABCDE', 'member'),
+  ]);
+  assert.deepEqual(ids, ['HH-00001', 'HH-00001']);
+  assert.equal(documents.get('recordIdCounters/households').lastIssued, 1);
+  assert.equal(await ensureHouseholdReference(db, 'H-ABCDE', 'owner'), 'HH-00001');
+  await assert.rejects(ensureHouseholdReference(db, 'H-ABCDE', 'stranger'), error => error.status === 403);
+  await assert.rejects(ensureHouseholdReference(db, 'missing', 'owner'), error => error.status === 404);
+  documents.set('households/H-OTHER', { createdBy: 'owner', displayId: 'legacy-unknown-reference' });
+  await assert.rejects(ensureHouseholdReference(db, 'H-OTHER', 'owner'), error => error.status === 409);
+  assert.equal(documents.get('households/H-OTHER').displayId, 'legacy-unknown-reference');
+});
 
 test('concurrent display ID allocations stay unique and sequential', async () => {
   const { db } = memoryFirestore();
