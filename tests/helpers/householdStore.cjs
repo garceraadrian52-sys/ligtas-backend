@@ -2,11 +2,13 @@ function householdStore() {
   const records = new Map();
   let sequence = 0;
   let tail = Promise.resolve();
-  const snapshot = path => ({ id: path.split('/').at(-1), ref: db.doc(path), exists: records.has(path), data: () => records.get(path) });
+  const snapshot = path => ({ id: path.split('/').at(-1), ref: db.doc(path), exists: records.has(path), data: () => records.get(path), get: field => records.get(path)?.[field] });
   const queryResult = query => {
-    const docs = [...records.keys()].filter(path => path.split('/').length === 2 && path.startsWith(query.collection + '/'))
+    let docs = [...records.keys()].filter(path => path.split('/').length === 2 && path.startsWith(query.collection + '/'))
       .filter(path => query.filters.every(([field, operator, value]) => operator === 'array-contains'
-        ? records.get(path)[field]?.includes(value) : records.get(path)[field] === value)).map(snapshot);
+        ? records.get(path)[field]?.includes(value) : operator === 'in' ? value.includes(records.get(path)[field])
+          : records.get(path)[field] === value)).map(snapshot);
+    if (query.maximum != null) docs = docs.slice(0, query.maximum);
     return { docs, size: docs.length, empty: !docs.length };
   };
   const db = {
@@ -14,6 +16,8 @@ function householdStore() {
     collection(name) {
       const query = { collection: name, filters: [],
         where(field, operator, value) { return { ...this, filters: [...this.filters, [field, operator, value]] }; },
+        limit(maximum) { return { ...this, maximum }; },
+        select() { return this; },
         get() { return Promise.resolve(queryResult(this)); },
         doc(id = `auto${String(++sequence).padStart(10, '0')}`) { return db.doc(`${name}/${id}`); },
       };
@@ -52,6 +56,7 @@ function householdStore() {
       ...(uid === 'juan' ? { householdMemberId: 'head' } : {}) });
   }
   records.set('barangays/wawa', { name: 'Wawa' });
+  records.set('recordIdCounters/households', { prefix: 'HH-', lastIssued: 1 });
   return { db, records, household };
 }
 module.exports = { householdStore };

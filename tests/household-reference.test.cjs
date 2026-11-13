@@ -7,9 +7,9 @@ function memoryFirestore(records) {
     collection(name) {
       assert.equal(name, 'households');
       return { where(field, operator, value) {
-        assert.deepEqual([field, operator], ['displayId', '==']);
+        assert.deepEqual([field, operator], ['displayId', 'in']);
         return { async get() {
-          const docs = records.filter(record => record.displayId === value).map(record => ({ id: record.id, data: () => record }));
+          const docs = records.filter(record => value.includes(record.displayId)).map(record => ({ id: record.id, data: () => record }));
           return { docs };
         } };
       } };
@@ -54,48 +54,76 @@ test('join accepts display aliases and legacy QR document keys without accepting
   }
 });
 
-
 const enabled = Boolean(process.env.FIREBASE_AUTH_EMULATOR_HOST && process.env.FIRESTORE_EMULATOR_HOST);
-test('authenticated QR and code joins remain pending until the head approves', { skip: !enabled }, async (t) => {
+test('authenticated cross-barangay join is private, atomic, and allows reapplying after rejection', { skip: !enabled }, async (t) => {
   process.env.FIREBASE_PROJECT_ID = 'demo-ligtas-tests';
   const express = require('express');
   const { db } = require('../dist/config/firebaseAdmin');
-  const app = express(); app.use(express.json()); app.use('/households', require('../dist/routes/households').default);
-  const server = await new Promise(resolve => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
-  t.after(async () => { server.closeAllConnections(); server.close(); await db.terminate(); });
+  const app = express();
+  app.use(express.json());
+  app.use('/households', require('../dist/routes/households').default);
+  const server = await new Promise(resolve => {
+    const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+  });
+  t.after(async () => {
+    server.closeAllConnections();
+    server.close();
+    await db.terminate();
+  });
+
   const signUp = async () => {
-    const response = await fetch('http://' + process.env.FIREBASE_AUTH_EMULATOR_HOST + '/identitytoolkit.googleapis.com/v1/accounts:signUp?key=demo-key', {
+    const response = await fetch(`http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}/identitytoolkit.googleapis.com/v1/accounts:signUp?key=demo-key`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ returnSecureToken: true }),
     });
-    assert.equal(response.status, 200); return response.json();
+    assert.equal(response.status, 200);
+    return response.json();
   };
-  const applicant = await signUp(), head = await signUp();
-  const householdId = 'H-AUTHJOIN';
+  const { localId: uid, idToken } = await signUp();
+  const { localId: officialUid, idToken: officialToken } = await signUp();
+  const profile = db.doc(`users/${uid}`);
+  const household = db.doc('households/H-TEST1');
+  const request = db.doc(`householdRequests/H-TEST1_${uid}`);
+  const householdData = { displayId: 'HH-00001', barangayId: 'barangay_wawa', createdBy: 'head', street: 'private test address', memberUids: ['head'] };
   await Promise.all([
-    db.doc('users/' + applicant.localId).set({ role: 'RESIDENT', name: 'Applicant', barangayId: 'wawa' }),
-    db.doc('users/' + head.localId).set({ role: 'RESIDENT', name: 'Head', barangayId: 'wawa', householdId }),
-    db.doc('households/' + householdId).set({ displayId: 'HH-00421', name: 'Household', head: 'Head', barangayId: 'wawa', createdBy: head.localId, memberUids: [head.localId], street: 'Private', contact: 'Private',
-      members: [{ id: 'head', userId: head.localId, name: 'Head', relationship: 'Head' }, { id: 'manual', name: 'Member', relationship: 'Niece' }] }),
+    profile.set({ role: 'resident', name: 'Applicant', barangayId: 'barangay_borol' }),
+    db.doc(`users/${officialUid}`).set({ role: 'BARANGAY_OFFICIAL', barangayId: 'barangay_wawa' }),
+    household.set(householdData),
   ]);
-  const post = (path, token, body) => fetch('http://127.0.0.1:' + server.address().port + '/households' + path, {
-    method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(body),
-  });
-  assert.equal((await post('/preview', null, { reference: 'HH-00421' })).status, 401);
-  for (const reference of ['HH-00421', JSON.stringify({ app: 'ligtas', version: 1, householdId })]) {
-    const response = await post('/preview', applicant.idToken, { reference }); assert.equal(response.status, 200);
-    const preview = (await response.json()).data; assert.equal(preview.members.length, 2); assert.equal(preview.contact, undefined); assert.equal(preview.street, undefined);
-  }
-  const request = async () => {
-    const response = await post('/join', applicant.idToken, { reference: 'HH-00421', memberId: 'manual', userId: 'forged' });
-    assert.equal(response.status, 201); return (await response.json()).data;
+  const join = async (reference, token = idToken, relationship = ' Niece ') => {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/households/join`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ reference, relationship, userId: 'forged', status: 'Approved' }),
+    });
+    return [response.status, await response.json()];
   };
-  let pending = await request();
-  assert.equal((await db.doc('users/' + applicant.localId).get()).get('householdId'), undefined);
-  assert.equal((await post('/join', applicant.idToken, { reference: householdId, memberId: 'manual' })).status, 409);
-  assert.equal((await post('/requests/' + pending.id + '/decision', head.idToken, { approve: false })).status, 200);
-  pending = await request();
-  assert.equal((await post('/requests/' + pending.id + '/decision', head.idToken, { approve: true })).status, 400);
-  assert.equal((await post('/requests/' + pending.id + '/decision', head.idToken, { approve: true, identityConfirmed: true })).status, 200);
-  const members = (await db.doc('households/' + householdId).get()).get('members');
-  assert.equal(members.length, 2); assert.equal(members[1].id, 'manual'); assert.equal(members[1].userId, applicant.localId);
+  assert.equal((await join('HH-00001', null))[0], 401);
+  assert.equal((await join('HH-00001', officialToken))[0], 403);
+  assert.equal((await join('HH-00001', idToken, ' '))[0], 400);
+  assert.equal((await join('HH-001'))[0], 400);
+  assert.equal((await join('HH-00010'))[0], 404);
+  assert.equal((await join('H-WRONG'))[0], 404);
+  const alias = db.doc('households/H-TEST2');
+  await alias.set({ ...householdData, displayId: 'HH-0001', barangayId: 'barangay_borol' });
+  assert.equal((await join('HH-0001'))[0], 409);
+  assert.equal((await request.get()).exists, false);
+  await alias.delete();
+
+  const results = await Promise.all([join('HH-0001'), join('HH-00001'), join('H-TEST1')]);
+  assert.deepEqual(results.map(([status]) => status).sort(), [201, 409, 409]);
+  assert.deepEqual(results.find(([status]) => status === 201)[1], { data: { id: `H-TEST1_${uid}`, status: 'Pending' } });
+  const submitted = (await request.get()).data();
+  assert.deepEqual({ ...submitted, createdAt: null, updatedAt: null }, {
+    householdId: 'H-TEST1', userId: uid, name: 'Applicant', relationship: 'Niece', status: 'Pending', revision: 1, createdAt: null, updatedAt: null,
+  });
+  assert.equal((await profile.get()).get('pendingHouseholdId'), 'H-TEST1');
+  assert.equal((await profile.get()).get('householdId'), undefined);
+  assert.deepEqual((await household.get()).data(), householdData);
+
+  const rejection = db.batch();
+  rejection.update(request, { status: 'Rejected', decidedBy: 'head' });
+  rejection.update(profile, { pendingHouseholdId: null, pendingHouseholdRequestId: null });
+  await rejection.commit();
+  assert.equal((await join('H-TEST1'))[0], 201);
+  assert.equal((await db.collection('householdRequests').where('userId', '==', uid).get()).size, 1);
+  assert.equal((await request.get()).get('decidedBy'), undefined);
 });

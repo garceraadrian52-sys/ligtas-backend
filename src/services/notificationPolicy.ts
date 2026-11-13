@@ -59,3 +59,9 @@ export function emergencyModeRevision(mode: any) {
 export function emergencyDeliveryCurrent(job: any, mode: any, user: any) {
   return normalizeRole(user?.role) === 'RESIDENT' && mode?.active === true && job.revision === emergencyModeRevision(mode);
 }
+
+export function householdDeliveryCurrent(job: any, request: any) {
+  const revision = request?.revision ?? 1;
+  return request?.userId === job.userId && request?.status === job.expectedStatus
+    && Number.isSafeInteger(revision) && revision >= 1 && (job.expectedRevision ?? 1) === revision;
+}

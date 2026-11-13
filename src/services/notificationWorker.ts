@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Timestamp, FieldValue, type DocumentReference } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
-import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision, emergencyModeRevision, emergencyDeliveryCurrent } from './notificationPolicy';
+import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision, emergencyModeRevision, emergencyDeliveryCurrent, householdDeliveryCurrent } from './notificationPolicy';
 import { assignDisplayIdIfMissing } from './recordDisplayIds';
 import { MUNICIPAL_ADMIN_ROLE_VALUES, normalizeRole } from './roles';
 
@@ -256,15 +256,18 @@ function startHouseholdRequestWatcher() {
       const request = change.doc.data();
       householdRequestCache.set(change.doc.id, request);
 
-      if (!request?.userId || !['Approved', 'Rejected'].includes(request.status) || request.status === before?.status) continue;
+      const revision = request?.revision ?? 1;
+      if (!request?.userId || !['Approved', 'Rejected'].includes(request.status)
+        || (request.status === before?.status && revision === (before?.revision ?? 1))) continue;
 
       console.log(`Household request ${change.doc.id} decided: ${request.status}, notifying user ${request.userId}`);
 
       const deciderName = request.decidedByName || 'the household head';
       await queueForUser(request.userId, {
         kind: 'household', targetId: request.householdId, sourcePath: change.doc.ref.path,
-        expectedStatus: request.status, title: 'Household Request', body: `Your household membership request was ${request.status.toLowerCase()} by ${deciderName}.`,
-      }, `household:${change.doc.id}:${Date.now()}`);
+        expectedStatus: request.status, expectedRevision: revision,
+        title: 'Household Request', body: `Your household membership request was ${request.status.toLowerCase()} by ${deciderName}.`,
+      }, `household:${change.doc.id}:${revision}:${request.status}`);
     }
   }, (error) => console.error('Household request watcher failed:', error));
 }
@@ -331,7 +334,7 @@ async function processDelivery(ref: DocumentReference) {
       if (!emergencyDeliveryCurrent(job, source, user)) return finish(ref, 'superseded');
     } else if (job.revision && job.revision !== alertRevision(job.targetId, source)) return finish(ref, 'superseded');
     if (job.kind === 'report' && (source.reporterId !== job.userId || String(source.verification ?? source.status).toLowerCase() !== job.expectedStatus)) return finish(ref, 'skipped');
-    if (job.kind === 'household' && (source.userId !== job.userId || source.status !== job.expectedStatus)) return finish(ref, 'skipped');
+    if (job.kind === 'household' && !householdDeliveryCurrent(job, source)) return finish(ref, 'skipped');
     if (!/^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/.test(device.token)) return finish(ref, 'failed', 'Invalid device token');
 
     const tickets = await expoRequest('send', [{

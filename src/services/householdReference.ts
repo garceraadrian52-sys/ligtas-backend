@@ -4,13 +4,15 @@ export type HouseholdReferenceLookup = { kind: 'found'; id: string } | { kind: '
 
 export function normalizeHouseholdDisplayId(value: unknown) {
   if (typeof value !== 'string') return null;
-  const normalized = value.trim().toUpperCase();
-  return /^HH-\d{5,}$/.test(normalized) ? normalized : null;
+  const reference = parseHouseholdJoinReference(value);
+  return reference?.displayIds?.[0] ?? null;
 }
 
-export async function findHouseholdByDisplayId(db: Firestore, displayId: string, barangayId: string): Promise<HouseholdReferenceLookup> {
-  const snapshot = await db.collection('households').where('displayId', '==', displayId).get();
-  const localMatches = snapshot.docs.filter(doc => doc.data().barangayId === barangayId);
+export async function findHouseholdByDisplayId(db: Firestore, displayId: string, barangayId: string | null): Promise<HouseholdReferenceLookup> {
+  const aliases = parseHouseholdJoinReference(displayId)?.displayIds;
+  if (!aliases) return { kind: 'missing' };
+  const snapshot = await db.collection('households').where('displayId', 'in', aliases).get();
+  const localMatches = barangayId === null ? snapshot.docs : snapshot.docs.filter(doc => doc.data().barangayId === barangayId);
   if (localMatches.length > 1) return { kind: 'duplicate' };
   if (localMatches.length === 0) return { kind: 'missing' };
   return { kind: 'found', id: localMatches[0].id };
@@ -19,6 +21,14 @@ export async function findHouseholdByDisplayId(db: Firestore, displayId: string,
 const internalIdPattern = /^H-[A-Z0-9-]{5,36}$/;
 
 export function parseHouseholdJoinReference(value: unknown) {
+  if (typeof value !== 'string') return null;
+  if (value.trim().startsWith('{')) {
+    try {
+      const qr = JSON.parse(value);
+      if (qr?.app !== 'ligtas' || qr.version !== 1 || typeof qr.householdId !== 'string') return null;
+      value = qr.householdId;
+    } catch { return null; }
+  }
   if (typeof value !== 'string') return null;
   const reference = value.trim().toUpperCase();
   if (internalIdPattern.test(reference)) return { id: reference };

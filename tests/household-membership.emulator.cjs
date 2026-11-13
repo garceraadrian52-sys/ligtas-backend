@@ -2,7 +2,9 @@ const assert = require('node:assert/strict');
 const { test, beforeEach, after } = require('node:test');
 const { initializeApp, deleteApp } = require('firebase-admin/app');
 const { getFirestore } = require('firebase-admin/firestore');
-const { requestMembership, decideMembership } = require('../dist/services/householdMembership');
+const service = require('../dist/services/householdMembership');
+const requestMembership = (db, reference, uid, input) => service.requestHouseholdJoin(db, uid, { ...input, reference });
+const decideMembership = (db, id, uid, approve, identityConfirmed = false) => service.decideHouseholdMembership(db, uid, id, { approve, identityConfirmed });
 
 const host = process.env.FIRESTORE_EMULATOR_HOST;
 if (!host || !/^(127\.0\.0\.1|localhost):\d+$/.test(host)) throw new Error('Run these tests with the local Firestore emulator.');
@@ -31,8 +33,9 @@ test('real Firestore transactions allow only one account to claim a member and p
   await db.doc('evacuationCenters/center').set({ occupied: 1, capacity: 10 });
   const history = (await db.doc('evacuationRecords/history').get()).data();
   const requests = await Promise.all(['maria', 'other'].map(uid => requestMembership(db, 'H-ABCDE', uid, { memberId: 'original-maria' })));
-  const decisions = await Promise.all(requests.map(request => decideMembership(db, request.id, 'head', true, true)));
-  assert.deepEqual(decisions.map(decision => decision.status).sort(), ['Approved', 'Rejected']);
+  const decisions = await Promise.allSettled(requests.map(request => decideMembership(db, request.id, 'head', true, true)));
+  assert.equal(decisions.filter(result => result.status === 'fulfilled' && result.value.status === 'Approved').length, 1);
+  assert.equal(decisions.find(result => result.status === 'rejected').reason.status, 409);
   const household = (await db.doc('households/H-ABCDE').get()).data();
   assert.equal(household.members.length, 3);
   assert.equal(household.members[1].id, 'original-maria');
