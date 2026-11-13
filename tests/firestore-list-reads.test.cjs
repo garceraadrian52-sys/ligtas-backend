@@ -43,6 +43,7 @@ const db = {
     return query;
   },
   doc(path) {
+    if (path === 'barangays/barangay_wawa') return { path, get: async () => ({ exists: true }) };
     if (path === 'recordIdCounters/reports') return { id: 'reports', path };
     throw new Error('Unexpected document read');
   },
@@ -126,7 +127,7 @@ test('report and audit writes invalidate cached lists', async () => {
   const response = await fetch(`${base}/reports`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'flood', location: 'Wawa', description: 'Road flooding' }),
+    body: JSON.stringify({ type: 'flood', location: 'Wawa', description: 'Road flooding', latitude: 14.81329798, longitude: 120.90529689 }),
   });
   assert.equal(response.status, 201);
   assert.equal(reads.reports, 2);

@@ -23,6 +23,8 @@ test('health reports HTTP availability without claiming a database connection', 
   assert.equal(response.status, 200);
   const data = await response.json();
   assert.equal(data.status, 'ok');
+  assert.equal(data.capabilities.residentReportSubmission, true);
+  assert.equal(data.capabilities.reportRouting, 'incident_coordinates_v1');
   assert.equal(data.database, 'not_checked');
   assert.equal(data.notificationWorkersEnabled, false);
 });

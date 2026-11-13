@@ -60,6 +60,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     message: 'LigTAS backend is running',
+    capabilities: { residentReportSubmission: true, reportRouting: 'incident_coordinates_v1' },
     database: 'not_checked',
     systemVersion: process.env.LIGTAS_SYSTEM_VERSION || '1.0',
     notificationWorkersEnabled: areNotificationWorkersStarted(),

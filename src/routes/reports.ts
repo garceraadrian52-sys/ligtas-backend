@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { submitLocatedReport, ReportSubmissionError } from '../services/reportSubmission';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { isMunicipalityAdmin } from '../services/roles';
@@ -8,8 +9,21 @@ import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors
 
 import { validText, validDocumentId, validCoordinatePair } from '../services/inputValidation';
 import { allocateDisplayId } from '../services/recordDisplayIds';
+import { resolveReportBarangay, ReportLocationError } from '../services/reportBarangay';
 const router = Router();
 router.param('id', (_req, res, next, id) => { if (!validDocumentId(id)) { res.status(400).json({ error: 'Invalid report ID.' }); return; } next(); });
+router.post('/submit', requireAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const data = await submitLocatedReport(db, req.user!.uid, req.body);
+    if (!data.duplicate) invalidateReportReads();
+    res.status(data.duplicate ? 200 : 201).json({ data });
+  } catch (error) {
+    if (error instanceof ReportSubmissionError) { res.status(error.status).json({ error: error.message }); return; }
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    console.error('Submit located report failed:', error);
+    res.status(503).json({ error: 'Report submission is temporarily unavailable. Your report remains saved for retry.' });
+  }
+});
 router.use(requireAuth, requireOfficial);
 
 // GET /reports
@@ -155,7 +169,11 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   if (!validCoordinatePair(latitude, longitude)) return res.status(400).json({ error: 'Enter valid latitude and longitude together.' });
   if ([waterLevel, roadStatus, floodingLevel, cause].some(value => value != null && !validText(value, 300))) return res.status(400).json({ error: 'Report details must be text of at most 300 characters.' });
   if (barangayId != null && !validDocumentId(barangayId)) return res.status(400).json({ error: 'Invalid barangay ID.' });
-  const targetBarangayId = isMunicipalityAdmin(req.user!.role) ? (barangayId ?? null) : req.user!.barangayId;
+  let incidentBarangay;
+  try { incidentBarangay = resolveReportBarangay(latitude, longitude); }
+  catch (error) { if (error instanceof ReportLocationError) return res.status(400).json({ error: error.message }); throw error; }
+  const targetBarangayId = incidentBarangay.id;
+  const autoVerified = isMunicipalityAdmin(req.user!.role) || req.user!.barangayId === targetBarangayId;
 
   try {
     if (targetBarangayId && !(await db.doc('barangays/' + targetBarangayId).get()).exists) return res.status(400).json({ error: 'Barangay does not exist.' });
@@ -165,18 +183,16 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       reportType: type,
       location: String(location).trim(),
       description: String(description).trim(),
-      status: 'Verified',
-      verification: 'Verified',
-      submittedByOfficial: true,
+      status: autoVerified ? 'Verified' : 'Pending',
+      verification: autoVerified ? 'Verified' : 'Pending',
+      submittedByOfficial: autoVerified,
       reporterId: req.user!.uid,
       reporterName: req.user!.name,
       createdByRole: req.user!.role,
-      barangayId: targetBarangayId,
+      barangayId: targetBarangayId, barangayName: incidentBarangay.name, routingVersion: 1, routingSource: 'incident_coordinates', boundarySource: incidentBarangay.boundarySource,
       latitude: latitude ?? null,
       longitude: longitude ?? null,
-      verifiedBy: req.user!.uid,
-      verifiedByName: req.user!.name,
-      verifiedAt: now,
+      ...(autoVerified ? { verifiedBy: req.user!.uid, verifiedByName: req.user!.name, verifiedAt: now } : {}),
       createdAt: now,
       updatedAt: now,
     };
