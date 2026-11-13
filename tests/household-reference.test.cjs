@@ -7,9 +7,9 @@ function memoryFirestore(records) {
     collection(name) {
       assert.equal(name, 'households');
       return { where(field, operator, value) {
-        assert.deepEqual([field, operator], ['displayId', '==']);
+        assert.deepEqual([field, operator], ['displayId', 'in']);
         return { async get() {
-          const docs = records.filter(record => record.displayId === value).map(record => ({ id: record.id, data: () => record }));
+          const docs = records.filter(record => value.includes(record.displayId)).map(record => ({ id: record.id, data: () => record }));
           return { docs };
         } };
       } };
@@ -113,7 +113,7 @@ test('authenticated cross-barangay join is private, atomic, and allows reapplyin
   assert.deepEqual(results.find(([status]) => status === 201)[1], { data: { status: 'Pending' } });
   const submitted = (await request.get()).data();
   assert.deepEqual({ ...submitted, createdAt: null, updatedAt: null }, {
-    householdId: 'H-TEST1', userId: uid, name: 'Applicant', relationship: 'Niece', status: 'Pending', createdAt: null, updatedAt: null,
+    householdId: 'H-TEST1', userId: uid, name: 'Applicant', relationship: 'Niece', status: 'Pending', revision: 1, createdAt: null, updatedAt: null,
   });
   assert.equal((await profile.get()).get('pendingHouseholdId'), 'H-TEST1');
   assert.equal((await profile.get()).get('householdId'), undefined);
