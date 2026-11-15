@@ -3,7 +3,7 @@ import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { isMunicipalityAdmin } from '../services/roles';
 import { auditActor, logActionInTransaction } from '../services/auditLog';
-import { alertLifecycle, alertValidity, alertTime } from '../services/alertLifecycle';
+import { alertLifecycle, alertValidity, alertTime, storedAlertValidity } from '../services/alertLifecycle';
 import { invalidateFirestoreReadCache } from '../services/firestoreReadCache';
 
 import { validDocumentId } from '../services/inputValidation';
@@ -154,10 +154,11 @@ router.patch('/:id/publish',async(req:AuthenticatedRequest,res)=>{
    const current=snapshot.data()!,state=alertLifecycle(current);
    if(state==='published')return current;
    if(state!=='draft')throw new Error('READ_ONLY');
-   if(!['manual','scheduled'].includes(current.validityMode) || (current.validityMode==='scheduled' && (alertTime(current.expiresAt) ?? 0)<=Date.now()))throw new Error('INVALID_VALIDITY');
-   const updates={status:'published',publishedAt:new Date(),updatedAt:new Date(),revision:(current.revision || 0)+1};
+   const validity=storedAlertValidity(current);
+   if(validity.validityMode==='scheduled' && (alertTime(validity.expiresAt) ?? 0)<=Date.now())throw new Error('INVALID_VALIDITY');
+   const updates={...validity,status:'published',publishedAt:new Date(),updatedAt:new Date(),revision:(current.revision || 0)+1};
    transaction.update(ref,updates);
-   logActionInTransaction(transaction,{...auditActor(req.user!),action:'alert_published',targetType:'alert',targetId:ref.id});
+   logActionInTransaction(transaction,{...auditActor(req.user!),action:'alert_published',targetType:'alert',targetId:ref.id,details:{validityMode:validity.validityMode,expiresAt:alertTime(validity.expiresAt)===null?null:new Date(alertTime(validity.expiresAt)!).toISOString()}});
    return {...current,...updates};
   });invalidateFirestoreReadCache('auditLogs:');res.json({data:{...data,id:ref.id}});
  }catch(error){return failure(res,error);}
@@ -182,7 +183,10 @@ router.patch('/:id',async(req:AuthenticatedRequest,res)=>{
  if(!isMunicipalityAdmin(req.user!.role))return res.status(403).json({error:'Only municipality administrators can edit alerts.'});
  const {category,priority,title,message,barangayIds,expectedRevision}=req.body ?? {};
  if(![category,title,message].every(value=>typeof value==='string'&&value.trim())||!['Critical','High','Normal','Low'].includes(priority)||title.length>160||message.length>5000||category.length>100||!Array.isArray(barangayIds)||barangayIds.some(id=>typeof id!=='string'||!Object.prototype.hasOwnProperty.call(barangayNames,id))||(expectedRevision!==undefined&&(!Number.isSafeInteger(expectedRevision)||expectedRevision<0)))return res.status(400).json({error:'Enter valid alert content and target areas.'});
- let validity;try{validity=alertValidity(req.body);}catch(error:any){return res.status(400).json({error:error.message});}
+ let requestedValidity:ReturnType<typeof alertValidity>|undefined;
+ if(req.body.validityMode!==undefined||Object.prototype.hasOwnProperty.call(req.body,'expiresAt')) {
+  try{requestedValidity=alertValidity(req.body);}catch(error:any){return res.status(400).json({error:error.message});}
+ }
  const ids=Array.from(new Set<string>(barangayIds));
  try{
   const ref=db.doc('alerts/'+req.params.id);
@@ -192,6 +196,7 @@ router.patch('/:id',async(req:AuthenticatedRequest,res)=>{
    if(!['draft','published'].includes(state))throw new Error('READ_ONLY');
    if(expectedRevision!==undefined&&expectedRevision!==(current.revision || 0))throw new Error('CONFLICT');
    if(state==='published'&&category!==current.category&&category!==current.alertType)throw new Error('INVALID_STATE');
+   const validity=requestedValidity ?? storedAlertValidity(current);
    const updates:Record<string,any>={...validity,category,alertType:category,priority,severityLevel:priority,title:title.trim(),message:message.trim(),description:message.trim(),coverageArea:ids.length?'barangay':'municipality',barangayId:ids[0]||null,affectedAreas:ids.length?ids.map(id=>barangayNames[id]):['All barangays in Balagtas'],locationScope:{type:ids.length?'barangay':'municipality',barangayIds:ids}};
    if(state==='draft')updates.recommendations=defaultRecommendations(category);
    const changedFields=Object.keys(updates).filter(key=>key==='expiresAt'?alertTime(current[key])!==alertTime(updates[key]):JSON.stringify(current[key])!==JSON.stringify(updates[key]));

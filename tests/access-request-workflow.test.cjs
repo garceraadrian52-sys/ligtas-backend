@@ -445,12 +445,27 @@ test('LGU Staff requests need no barangay and are stored at municipal level',asy
  }
 });
 
-test('LGU Staff cannot submit a barangay assignment through the API',async()=>{
+test('legacy LGU Staff barangay selections are validated but never stored as municipal assignments',async()=>{
  rows.set('barangays/barangay_borol_1st',{name:'Borol 1st'});
- for(const fields of [{},{barangayId:null},{barangay:''},{barangayId:'',barangay:{name:'Borol 1st'}}]){
-  assert.equal((await submitAccessRequest({role:'LGU Staff',...fields})).status,400);
+ for(const fields of [{},{barangayId:null},{barangay:undefined},{barangayId:undefined,barangay:'Borol 1st'}]){
+  const response=await submitAccessRequest({role:'LGU Staff',email:'legacy-'+rows.size+'@example.test',...fields});
+  assert.equal(response.status,201);const {data}=await response.json();const saved=rows.get('accessRequests/'+data.id);
+  assert.equal(saved.role,'LGU Staff');assert.equal(saved.barangayId,null);assert.equal(saved.barangay,null);
  }
+});
+
+test('municipal compatibility does not accept malformed, mismatched or outside-town barangay selections',async()=>{
+ rows.set('barangays/barangay_borol_1st',{name:'Borol 1st'});rows.set('barangays/outside',{name:'Outside Municipality'});
+ for(const fields of [{barangayId:'../users/admin'},{barangayId:{}},{barangayId:'missing'},{barangayId:'outside',barangay:'Outside Municipality'},{barangay:'Wawa'},{barangayId:'',barangay:{name:'Borol 1st'}}])assert.equal((await submitAccessRequest({role:'LGU Staff',...fields})).status,400);
  assert.equal([...rows.keys()].some(path=>path.startsWith('accessRequests/')),false);
+});
+
+test('approving a legacy municipal request creates the same municipal role without a barangay link',async()=>{
+ rows.set('barangays/barangay_borol_1st',{name:'Borol 1st'});
+ const response=await submitAccessRequest({role:'LGU Staff'});assert.equal(response.status,201);const {data}=await response.json();
+ const approved=await register({name:'New Applicant',email:'new.applicant@example.test',role:'LGU_ADMIN',accessRequestId:data.id});
+ assert.equal(approved.status,201);const payload=await approved.json();const profile=rows.get('users/'+payload.data.id);
+ assert.equal(profile.role,'LGU_ADMIN');assert.equal(profile.barangayId,null);assert.equal(rows.get('accessRequests/'+data.id).registeredUserId,payload.data.id);
 });
 
 test('official requests require an existing Balagtas barangay and cannot use an outside registry entry',async()=>{

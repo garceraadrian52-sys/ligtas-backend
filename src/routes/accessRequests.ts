@@ -67,8 +67,10 @@ router.post('/', async (req, res) => {
   }
   const requiresBarangay = role === 'Barangay Official';
   const barangayText = typeof barangay === 'string' ? barangay.trim() : '';
-  if (!requiresBarangay && ((barangayId != null && barangayId !== '') || (barangay != null && (typeof barangay !== 'string' || barangayText)))) {
-    return res.status(400).json({ error: 'LGU Staff are municipality-level personnel and cannot have a barangay assignment.' });
+  const hasBarangayId = barangayId != null && barangayId !== '';
+  const legacyMunicipalBarangay = !requiresBarangay && (hasBarangayId || Boolean(barangayText));
+  if (!requiresBarangay && ((hasBarangayId && !validDocumentId(barangayId)) || (barangay != null && typeof barangay !== 'string'))) {
+    return res.status(400).json({ error: 'Choose a valid barangay.' });
   }
   if (requiresBarangay && ((barangayId != null && !validDocumentId(barangayId)) || (barangay != null && typeof barangay !== 'string') || (!barangayId && !barangayText))) {
     return res.status(400).json({ error: 'Select a valid barangay in Balagtas.' });
@@ -77,7 +79,7 @@ router.post('/', async (req, res) => {
   try {
     let resolvedBarangayId: string | null = null;
     let resolvedBarangayName: string | null = null;
-    if (requiresBarangay && barangayId) {
+    if ((requiresBarangay || legacyMunicipalBarangay) && hasBarangayId) {
       const barangaySnapshot = await db.doc(`barangays/${barangayId}`).get();
       if (!barangaySnapshot.exists) return res.status(400).json({ error: 'Choose a valid barangay.' });
       const data = barangaySnapshot.data() ?? {};
@@ -88,7 +90,7 @@ router.post('/', async (req, res) => {
       }
       resolvedBarangayId = barangaySnapshot.id;
       resolvedBarangayName = name;
-    } else if (requiresBarangay) {
+    } else if (requiresBarangay || legacyMunicipalBarangay) {
       // Keep compatibility with older web clients that submit the barangay label only.
       const snapshot = await db.collection('barangays').get();
       const match = snapshot.docs.find(doc => {
@@ -103,6 +105,12 @@ router.post('/', async (req, res) => {
         : typeof data.displayName === 'string' ? data.displayName.trim() : barangayText;
     }
 
+    // Older LGU forms required a barangay. Validate it above, but never give
+    // municipal personnel a barangay assignment or copy it into their profile.
+    if (!requiresBarangay) {
+      resolvedBarangayId = null;
+      resolvedBarangayName = null;
+    }
     const now = new Date();
 
     const requestData = {

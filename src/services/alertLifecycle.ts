@@ -12,8 +12,11 @@ export function alertLifecycle(data:any,now=Date.now()):string {
   return ['active','published','monitoring'].includes(status)?'published':status;
 }
 export function alertValidity(body:any,now=Date.now()) {
-  if(body.validityMode==='manual')return {validityMode:'manual',expiresAt:null};
-  if(body.validityMode!=='scheduled')throw new Error('Select an alert validity option.');
+  // Older clients did not send a mode: no deadline meant no automatic expiry.
+  // An explicitly supplied deadline must still pass scheduled validity checks.
+  const mode=body.validityMode===undefined?(body.expiresAt==null?'manual':'scheduled'):body.validityMode;
+  if(mode==='manual')return {validityMode:'manual',expiresAt:null};
+  if(mode!=='scheduled')throw new Error('Select an alert validity option.');
   // Require an explicit timezone; datetime-local values must be converted from Manila by the client.
   if(typeof body.expiresAt!=='string' || !/(Z|[+-]\d{2}:\d{2})$/.test(body.expiresAt))throw new Error('Enter an expiration date and time in Asia/Manila.');
   const parts=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.exec(body.expiresAt);
@@ -23,5 +26,12 @@ export function alertValidity(body:any,now=Date.now()) {
   const expires=alertTime(body.expiresAt);
   if(expires===null || expires<=now)throw new Error('Expiration must be in the future.');
   return {validityMode:'scheduled',expiresAt:new Date(expires)};
+}
+export function storedAlertValidity(data:any) {
+  const mode=data.validityMode==null?(data.expiresAt==null?'manual':'scheduled'):data.validityMode;
+  if(mode==='manual')return {validityMode:'manual',expiresAt:null};
+  if(mode!=='scheduled'||alertTime(data.expiresAt)===null)throw new Error('INVALID_VALIDITY');
+  // Preserve the stored timestamp, including an expired draft's original deadline.
+  return {validityMode:'scheduled',expiresAt:data.expiresAt};
 }
 export function alertPriority(data:any) {const value=String(data.priority || data.severityLevel || data.severity || '').toLowerCase();return ({critical:0,high:1,warning:1,normal:2,information:2,low:3} as Record<string,number>)[value] ?? 4;}
