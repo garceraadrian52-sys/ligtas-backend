@@ -1,3 +1,4 @@
+import { alertLifecycle } from './alertLifecycle';
 import { createHash } from 'node:crypto';
 import { isMunicipalityAdmin, normalizeRole } from './roles';
 
@@ -11,9 +12,7 @@ function normalize(value: unknown) {
 }
 
 export function published(data: any, now = Date.now()) {
-  const expires = data?.expiresAt?.toMillis?.() ?? (data?.expiresAt ? new Date(data.expiresAt).getTime() : null);
-  return ['active', 'published', 'monitoring'].includes(String(data?.status ?? '').toLowerCase())
-    && (expires === null || (Number.isFinite(expires) && expires > now));
+  return alertLifecycle(data,now)==='published';
 }
 
 export function inArea(data: any, user: any) {

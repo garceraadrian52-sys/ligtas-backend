@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { automaticBarangays } from '../services/automaticAlertPolicy';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { logActionInTransaction } from '../services/auditLog';
@@ -20,6 +21,9 @@ function normalizedBarangay(value: unknown) {
     : '';
 }
 
+const balagtasBarangayNames = new Set(Object.values(automaticBarangays).map(normalizedBarangay));
+const isBalagtasBarangay = (name: unknown) => balagtasBarangayNames.has(normalizedBarangay(name));
+
 function errorCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
   return typeof error.code === 'string' ? error.code : undefined;
@@ -34,7 +38,7 @@ router.get('/options', async (_req, res) => {
         const data = doc.data();
         const name = typeof data.name === 'string' ? data.name.trim()
           : typeof data.displayName === 'string' ? data.displayName.trim() : '';
-        return name ? { id: doc.id, name, label: /^barangay\s+/i.test(name) ? name : `Barangay ${name}` } : null;
+        return name && isBalagtasBarangay(name) ? { id: doc.id, name, label: /^barangay\s+/i.test(name) ? name : `Barangay ${name}` } : null;
       })
       .filter((barangay): barangay is { id: string; name: string; label: string } => barangay !== null)
       .sort((left, right) => left.name.localeCompare(right.name));
@@ -57,40 +61,46 @@ router.post('/', async (req, res) => {
 
   if (!nameText || nameText.length > 200 || !isValidEmail(emailText)
     || !phoneText || phoneText.length > 40 || !positionText || positionText.length > 120
-    || !reasonText || reasonText.length > 1500 || typeof barangay !== 'string' || !barangay.trim()
+    || !reasonText || reasonText.length > 1500
     || !accessRequestRoles.some(option => option.value === role)) {
     return res.status(400).json({ error: 'All fields are required.' });
   }
-  if (barangayId !== undefined && !validDocumentId(barangayId)) {
-    return res.status(400).json({ error: 'Choose a valid barangay.' });
+  const requiresBarangay = role === 'Barangay Official';
+  const barangayText = typeof barangay === 'string' ? barangay.trim() : '';
+  if (!requiresBarangay && ((barangayId != null && barangayId !== '') || (barangay != null && (typeof barangay !== 'string' || barangayText)))) {
+    return res.status(400).json({ error: 'LGU Staff are municipality-level personnel and cannot have a barangay assignment.' });
+  }
+  if (requiresBarangay && ((barangayId != null && !validDocumentId(barangayId)) || (barangay != null && typeof barangay !== 'string') || (!barangayId && !barangayText))) {
+    return res.status(400).json({ error: 'Select a valid barangay in Balagtas.' });
   }
 
   try {
     let resolvedBarangayId: string | null = null;
-    let resolvedBarangayName = barangay.trim();
-    if (barangayId) {
+    let resolvedBarangayName: string | null = null;
+    if (requiresBarangay && barangayId) {
       const barangaySnapshot = await db.doc(`barangays/${barangayId}`).get();
       if (!barangaySnapshot.exists) return res.status(400).json({ error: 'Choose a valid barangay.' });
       const data = barangaySnapshot.data() ?? {};
       const name = typeof data.name === 'string' ? data.name.trim()
         : typeof data.displayName === 'string' ? data.displayName.trim() : '';
-      if (!name || normalizedBarangay(name) !== normalizedBarangay(barangay)) {
+      if (!isBalagtasBarangay(name) || (barangayText && normalizedBarangay(name) !== normalizedBarangay(barangayText))) {
         return res.status(400).json({ error: 'The selected barangay does not match its saved record.' });
       }
       resolvedBarangayId = barangaySnapshot.id;
       resolvedBarangayName = name;
-    } else {
+    } else if (requiresBarangay) {
       // Keep compatibility with older web clients that submit the barangay label only.
       const snapshot = await db.collection('barangays').get();
       const match = snapshot.docs.find(doc => {
         const data = doc.data();
-        return normalizedBarangay(data.name ?? data.displayName ?? doc.id) === normalizedBarangay(barangay);
+        const name = data.name ?? data.displayName ?? doc.id;
+        return isBalagtasBarangay(name) && normalizedBarangay(name) === normalizedBarangay(barangayText);
       });
       if (!match) return res.status(400).json({ error: 'Choose a valid barangay.' });
       const data = match.data();
       resolvedBarangayId = match.id;
       resolvedBarangayName = typeof data.name === 'string' ? data.name.trim()
-        : typeof data.displayName === 'string' ? data.displayName.trim() : barangay.trim();
+        : typeof data.displayName === 'string' ? data.displayName.trim() : barangayText;
     }
 
     const now = new Date();
@@ -285,8 +295,9 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
       });
     }
 
-    // Email is optional and must not prevent rejection.
+    // Notify the email stored on the request after its rejection has committed.
     let emailSent = false;
+    let emailStatus: 'accepted' | 'not_configured' | 'invalid_recipient' | 'failed' = 'not_configured';
 
     const smtpConfigured = [
       'SMTP_HOST',
@@ -295,7 +306,8 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
       'SMTP_FROM',
     ].every(key => Boolean(process.env[key]?.trim()));
 
-    if (smtpConfigured && isValidEmail(result.data.email)) {
+    if (!isValidEmail(result.data.email)) emailStatus='invalid_recipient';
+    else if (smtpConfigured) {
       try {
         await sendAccessRequestRejectionEmail({
           email: String(result.data.email).trim().toLowerCase(),
@@ -305,7 +317,9 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
         });
 
         emailSent = true;
+        emailStatus='accepted';
       } catch (emailError: unknown) {
+        emailStatus=errorCode(emailError)==='ACCESS_REQUEST_EMAIL_NOT_CONFIGURED'?'not_configured':'failed';
         console.error(
           'Rejection email delivery failed:',
           errorCode(emailError) ?? 'unknown'
@@ -317,6 +331,7 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
       data: result.data,
       notification: {
         emailSent,
+        emailStatus,
       },
     });
   } catch (error) {

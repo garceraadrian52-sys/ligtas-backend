@@ -1,3 +1,4 @@
+import { alertLifecycle, alertPriority } from './alertLifecycle';
 type RecordData = Record<string, any>;
 export function dateMillis(value: any): number {
   const millis = value?.toMillis?.() ?? (value?._seconds !== undefined ? value._seconds * 1000 : value?.seconds !== undefined ? value.seconds * 1000 : new Date(value ?? NaN).getTime());
@@ -6,12 +7,12 @@ export function dateMillis(value: any): number {
 const localDay = (value: number) => new Date(value).toLocaleDateString('en-CA', { timeZone: 'Asia/Manila' });
 const count = (value: unknown) => Math.max(0, Number.isFinite(Number(value)) ? Number(value) : 0);
 export function summarizeDashboard(reports: RecordData[], alerts: RecordData[], centers: RecordData[], now = Date.now()) {
-  const active = alerts.filter(item => ['active', 'published', 'monitoring'].includes(String(item.status).toLowerCase()) && (!item.expiresAt || dateMillis(item.expiresAt) > now));
+  const active = alerts.filter(item => alertLifecycle(item,now)==='published');
   const seenAlerts = new Set<string>();
   const seenContent = new Set<string>();
   const recentAlerts = active
     .filter(item => item.isActive !== false && item.active !== false)
-    .sort((a, b) => dateMillis(b.publishedAt ?? b.createdAt) - dateMillis(a.publishedAt ?? a.createdAt))
+    .sort((a, b) => alertPriority(a)-alertPriority(b) || dateMillis(b.publishedAt ?? b.createdAt) - dateMillis(a.publishedAt ?? a.createdAt))
     .filter(item => {
       const key = String(item.id || JSON.stringify([item.title, item.message || item.description, dateMillis(item.publishedAt ?? item.createdAt)]));
       const message = item.message || item.description;
@@ -26,13 +27,13 @@ export function summarizeDashboard(reports: RecordData[], alerts: RecordData[], 
       if (contentKey) seenContent.add(contentKey);
       return true;
     })
-    .slice(0, 3)
+    .slice(0, 5)
     .map(item => ({
       id: item.id,
       displayId: item.displayId,
       title: item.title || item.alertType || 'Alert',
       message: item.message || item.description || '',
-      priority: item.priority || item.severityLevel || item.severity || 'Normal',
+      priority: item.priority || item.severityLevel || item.severity || 'Unspecified',
       severity: item.severity || item.severityLevel,
       type: item.type || item.category || item.alertType,
       status: item.status,

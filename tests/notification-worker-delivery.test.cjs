@@ -93,6 +93,16 @@ test('a newly published barangay alert queues one eligible device delivery and d
   const inbox = [...jobs.values()].filter(job => job.state === 'inbox');
   assert.equal(inbox.length, 2);
   assert.ok(inbox.every(job => job.userId === 'super-admin' && job.targetPath === '/Alerts_Management'));
+  const updated={...alert,data:()=>({...alert.data(),message:'Updated safety instructions.'})};
+  await callbacks.get('alerts')({docs:[updated],size:1,docChanges:()=>[{type:'modified',doc:updated}]});
+  assert.equal(jobs.size,9,'significant edits queue one new revision without altering earlier deliveries');
+  const cancelled={...updated,data:()=>({...updated.data(),status:'deactivated',deactivatedAt:new Date(),deactivationReason:'Superseded advisory'})};
+  await callbacks.get('alerts')({docs:[cancelled],size:1,docChanges:()=>[{type:'modified',doc:cancelled}]});
+  assert.equal(jobs.size,12);
+  assert.equal([...jobs.values()].filter(job=>job.cancelled&&job.state==='pending').length,2);
+  assert.ok([...jobs.values()].some(job=>job.state==='inbox'&&job.title.startsWith('Alert cancelled:')));
+  await callbacks.get('alerts')({docs:[cancelled],size:1,docChanges:()=>[{type:'modified',doc:cancelled}]});
+  assert.equal(jobs.size,12,'cancellation replay never duplicates the existing notifications');
   const mode = { active: true, revision: 1, changedAt: new Date() };
   await callbacks.get('systemSettings/emergencyMode')({ data: () => mode });
   const emergency = [...jobs.values()].filter(job => job.kind === 'emergency');

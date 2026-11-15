@@ -8,7 +8,7 @@ test('dashboard excludes expired alerts, sorts recent advisories and uses Manila
  assert.deepEqual(result.recentAlerts.map(a=>a.id),['b','a']);assert.equal(result.evacuationCenters.totalOccupied,3);assert.equal(result.evacuationCenters.totalCapacity,10);
 });
 
-test('dashboard returns the three newest unique active alerts with full detail fields',()=>{
+test('dashboard returns up to five unique active alerts in priority order with full detail fields',()=>{
  const now=Date.parse('2026-11-12T13:00:00Z');
  const newest={id:'new',title:'Newest advisory',status:'published',priority:'Normal',publishedAt:'2026-11-12T12:00:00Z',message:'Complete instructions.',category:'Flood Warning',locationScope:{type:'municipality'},recommendations:['Stay prepared.']};
  const alerts=[
@@ -22,10 +22,10 @@ test('dashboard returns the three newest unique active alerts with full detail f
   {id:'disabled',status:'inactive',createdAt:'2026-11-12T12:59:00Z'},
  ];
  const result=summarizeDashboard([],alerts,[],now);
- assert.deepEqual(result.recentAlerts.map(item=>item.id),['new','second','third']);
- assert.equal(result.recentAlerts[0].message,newest.message);
- assert.equal(result.recentAlerts[0].type,'Flood Warning');
- assert.equal(result.recentAlerts[0].status,'published');
- assert.deepEqual(result.recentAlerts[0].locationScope,newest.locationScope);
- assert.deepEqual(result.recentAlerts[0].recommendations,newest.recommendations);
+ assert.deepEqual(result.recentAlerts.map(item=>item.id),['old-critical','new','second','third']);
+ assert.equal(result.recentAlerts[1].message,newest.message);
+ assert.equal(result.recentAlerts[1].type,'Flood Warning');
+ assert.equal(result.recentAlerts[1].status,'published');
+ assert.deepEqual(result.recentAlerts[1].locationScope,newest.locationScope);
+ assert.deepEqual(result.recentAlerts[1].recommendations,newest.recommendations);
 });

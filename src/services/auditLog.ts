@@ -7,12 +7,12 @@ export type AuditParams = {
   actorBarangayId?: string | null; action: string; targetType: string; targetId: string;
   module?: string; outcome?: 'success' | 'failure'; details?: Record<string, any>; eventId?: string;
 };
-const safeKeys = new Set(['type','status','previousStatus','role','previousRole','disabled','previouslyDisabled','barangayId','displayId','changedFields','redactedFields','before','after','count','total','succeeded','failed','reportIds','format','collections','name','truncated','reasonCode','httpStatus','active','revision','centerId','fromCenterId','toCenterId','peopleCount','recordIds','source','delivery','published','verification','capacity','occupied','currentOccupancy','occupancyCount','facilities','expectedRevision']);
-const secretKey = /password|token|secret|email|phone|contact|address|photo|memberNames|householdName|description|message|location/i;
+const safeKeys = new Set(['type','status','previousStatus','role','previousRole','disabled','previouslyDisabled','barangayId','displayId','changedFields','redactedFields','before','after','count','total','succeeded','failed','reportIds','format','collections','name','truncated','reasonCode','httpStatus','active','revision','centerId','fromCenterId','toCenterId','peopleCount','recordIds','source','delivery','published','verification','capacity','occupied','currentOccupancy','occupancyCount','facilities','expectedRevision','title','message','description','priority','severityLevel','category','alertType','affectedAreas','locationScope','barangayIds','validityMode','expiresAt','reason']);
+const secretKey = /password|token|secret|email|phone|contact|address|photo|memberNames|householdName/i;
 export function sanitizeAuditDetails(value: any, depth = 0): any {
   if (depth > 5) return null;
   if (value == null || typeof value === 'boolean' || typeof value === 'number') return value ?? null;
-  if (typeof value === 'string') return value.slice(0,500);
+  if (typeof value === 'string') return value.slice(0,5000);
   if (Array.isArray(value)) return value.slice(0,200).map(item => sanitizeAuditDetails(item,depth+1));
   if (typeof value !== 'object') return null;
   return Object.fromEntries(Object.entries(value).filter(([key]) => safeKeys.has(key) && !secretKey.test(key)).map(([key,item]) => [key,sanitizeAuditDetails(item,depth+1)]));

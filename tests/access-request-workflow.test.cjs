@@ -373,7 +373,7 @@ test('rejection without SMTP saves the reason and reviewer and atomically record
   assert.equal(payload.data.rejectionReason, 'The submitted details could not be verified.');
   assert.equal(payload.data.reviewedBy, 'reviewer-uid');
   assert.equal(typeof payload.data.reviewedAt, 'string');
-  assert.deepEqual(payload.notification, { emailSent: false });
+  assert.deepEqual(payload.notification, { emailSent: false, emailStatus: 'not_configured' });
   assert.equal(rows.get('accessRequests/request-001').status, 'Rejected');
   const rejectionAudit = [...rows.entries()].find(([path]) => path.startsWith('auditLogs/'))?.[1];
   assert.equal(rejectionAudit.action, 'access_request_rejected');
@@ -412,7 +412,7 @@ test('configured email delivery is reported accurately and a delivery failure do
   for (const [key, value] of Object.entries({ SMTP_HOST: 'smtp.example.test', SMTP_USER: 'mailer', SMTP_PASS: 'test-only', SMTP_FROM: 'noreply@example.test' })) process.env[key] = value;
   addPendingRequest('mail-success');
   const sent = await reject('mail-success');
-  assert.deepEqual((await sent.json()).notification, { emailSent: true });
+  assert.deepEqual((await sent.json()).notification, { emailSent: true, emailStatus: 'accepted' });
   assert.equal(mailCalls.length, 1);
 
   addPendingRequest('mail-failure');
@@ -420,7 +420,7 @@ test('configured email delivery is reported accurately and a delivery failure do
   const failed = await reject('mail-failure');
   const failedPayload = await failed.json();
   assert.equal(failed.status, 200);
-  assert.deepEqual(failedPayload.notification, { emailSent: false });
+  assert.deepEqual(failedPayload.notification, { emailSent: false, emailStatus:'failed' });
   assert.equal(rows.get('accessRequests/mail-failure').status, 'Rejected');
 });
 
@@ -432,4 +432,51 @@ test('audit transaction failure leaves the request pending and sends no email', 
   assert.equal(rows.get('accessRequests/request-001').status, 'Pending');
   assert.equal([...rows.keys()].some(path => path.startsWith('auditLogs/')), false);
   assert.equal(mailCalls.length, 0);
+});
+
+
+test('LGU Staff requests need no barangay and are stored at municipal level',async()=>{
+ for(const fields of [{barangayId:undefined,barangay:undefined},{barangayId:null,barangay:null},{barangayId:'',barangay:''}]){
+  const email='municipal-'+rows.size+'@example.test';
+  const response=await submitAccessRequest({...fields,role:'LGU Staff',email});
+  assert.equal(response.status,201);
+  const {data}=await response.json();const saved=rows.get('accessRequests/'+data.id);
+  assert.equal(saved.barangayId,null);assert.equal(saved.barangay,null);assert.equal(saved.role,'LGU Staff');
+ }
+});
+
+test('LGU Staff cannot submit a barangay assignment through the API',async()=>{
+ rows.set('barangays/barangay_borol_1st',{name:'Borol 1st'});
+ for(const fields of [{},{barangayId:null},{barangay:''},{barangayId:'',barangay:{name:'Borol 1st'}}]){
+  assert.equal((await submitAccessRequest({role:'LGU Staff',...fields})).status,400);
+ }
+ assert.equal([...rows.keys()].some(path=>path.startsWith('accessRequests/')),false);
+});
+
+test('official requests require an existing Balagtas barangay and cannot use an outside registry entry',async()=>{
+ rows.set('barangays/outside',{name:'Outside Municipality'});
+ rows.set('barangays/barangay_borol_1st',{name:'Borol 1st'});
+ for(const fields of [{barangayId:undefined,barangay:undefined},{barangayId:null,barangay:''},{barangayId:'missing',barangay:'Borol 1st'},{barangayId:'outside',barangay:'Outside Municipality'},{barangayId:'barangay_borol_1st',barangay:'Wawa'}]){
+  assert.equal((await submitAccessRequest(fields)).status,400);
+ }
+ assert.equal([...rows.keys()].some(path=>path.startsWith('accessRequests/')),false);
+ const response=await submitAccessRequest({barangay:undefined});
+ assert.equal(response.status,201);
+ const {data}=await response.json();assert.equal(rows.get('accessRequests/'+data.id).barangay,'Borol 1st');
+});
+
+test('options omit outside barangays and legacy official requests still resolve a valid barangay name',async()=>{
+ rows.set('barangays/outside',{name:'Outside Municipality'});rows.set('barangays/wawa',{name:'Wawa'});
+ const options=await(await fetch(base+'/access-requests/options')).json();
+ assert.deepEqual(options.data.barangays.map(item=>item.id),['wawa']);
+ const response=await submitAccessRequest({barangayId:undefined,barangay:'Wawa'});assert.equal(response.status,201);
+ const {data}=await response.json();assert.equal(rows.get('accessRequests/'+data.id).barangayId,'wawa');
+});
+
+
+test('rejection email recipient comes from the saved request and cannot be overridden in the review payload',async()=>{
+ for(const [key,value] of Object.entries({SMTP_HOST:'smtp.example.test',SMTP_USER:'mailer',SMTP_PASS:'test-only',SMTP_FROM:'noreply@example.test'}))process.env[key]=value;
+ addPendingRequest('saved-address',{email:'actual.applicant@example.test'});
+ const response=await reject('saved-address',{status:'Rejected',rejectionReason:'Official appointment must be provided.',email:'different@example.test'});
+ assert.equal(response.status,200);assert.equal(mailCalls.length,1);assert.equal(mailCalls[0].email,'actual.applicant@example.test');assert.equal(mailCalls[0].reason,'Official appointment must be provided.');
 });

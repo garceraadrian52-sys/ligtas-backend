@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { isValidEmail } from './profileFields';
 
 export interface AccessRequestRejectionEmail {
   email: string;
@@ -31,6 +32,8 @@ export async function sendAccessRequestRejectionEmail(request: AccessRequestReje
     throw error;
   }
 
+  const recipient=request.email.trim().toLowerCase();
+  if(!isValidEmail(recipient)){throw Object.assign(new Error('The requester email address is invalid.'),{code:'ACCESS_REQUEST_EMAIL_INVALID_RECIPIENT'});}
   const transporter = nodemailer.createTransport({
     host,
     port,
@@ -48,14 +51,16 @@ export async function sendAccessRequestRejectionEmail(request: AccessRequestReje
   const safeRole = htmlEscape(role);
   const safeReason = htmlEscape(reason).replace(/\r?\n/g, '<br>');
 
-  await transporter.sendMail({
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+  const result = await Promise.race([transporter.sendMail({
     from,
-    to: request.email,
-    subject: 'Update on your LigTAS access request',
+    to: recipient,
+    subject: 'LigTAS access request rejected',
     text: [
       `Hello ${name},`,
       '',
-      `Your request for ${role} access to LigTAS was not approved.`,
+      `Your request for ${role} access to LigTAS was rejected.`,
       '',
       'Reason for rejection:',
       reason,
@@ -64,6 +69,13 @@ export async function sendAccessRequestRejectionEmail(request: AccessRequestReje
       '',
       'LigTAS',
     ].join('\n'),
-    html: `<div style="font-family:Arial,sans-serif;color:#26384d;line-height:1.6;max-width:620px;margin:0 auto;padding:24px"><h2 style="color:#173d70;margin:0 0 16px">LigTAS access request update</h2><p>Hello ${safeName},</p><p>Your request for <strong>${safeRole}</strong> access to LigTAS was not approved.</p><div style="border-left:4px solid #d54a5b;background:#fff6f7;padding:14px 16px;margin:20px 0"><strong>Reason for rejection</strong><p style="margin:8px 0 0">${safeReason}</p></div><p>If you have questions, please contact the LGU office that reviewed your request.</p><p style="margin-top:24px;color:#64748b">LigTAS</p></div>`,
-  });
+    html: `<div style="font-family:Arial,sans-serif;color:#26384d;line-height:1.6;max-width:620px;margin:0 auto;padding:24px"><h2 style="color:#173d70;margin:0 0 16px">LigTAS access request update</h2><p>Hello ${safeName},</p><p>Your request for <strong>${safeRole}</strong> access to LigTAS was rejected.</p><div style="border-left:4px solid #d54a5b;background:#fff6f7;padding:14px 16px;margin:20px 0"><strong>Reason for rejection</strong><p style="margin:8px 0 0">${safeReason}</p></div><p>If you have questions, please contact the LGU office that reviewed your request.</p><p style="margin-top:24px;color:#64748b">LigTAS</p></div>`,
+  }),new Promise<never>((_resolve,reject)=>{timeout=setTimeout(()=>reject(Object.assign(new Error('The mail service timed out.'),{code:'ACCESS_REQUEST_EMAIL_TIMEOUT'})),12000);})]);
+  // A resolved SMTP request can still reject this recipient; never report that as sent.
+  const accepted=(result.accepted || []).some(address=>String(address).toLowerCase()===recipient);
+  if(!accepted)throw Object.assign(new Error('The mail server did not accept the rejection email.'),{code:'ACCESS_REQUEST_EMAIL_REJECTED'});
+  } finally {
+    clearTimeout(timeout);
+    transporter.close();
+  }
 }

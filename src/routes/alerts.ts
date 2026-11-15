@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
 import { isMunicipalityAdmin } from '../services/roles';
-import { logAction } from '../services/auditLog';
+import { auditActor, logActionInTransaction } from '../services/auditLog';
+import { alertLifecycle, alertValidity, alertTime } from '../services/alertLifecycle';
+import { invalidateFirestoreReadCache } from '../services/firestoreReadCache';
 
 import { validDocumentId } from '../services/inputValidation';
 import { automaticAlertsStatus } from '../services/automaticAlerts';
@@ -74,7 +76,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   }
 
   const { category, priority, title, message, barangayIds, publish } = req.body ?? {};
-  if (![category, title, message].every(value => typeof value === 'string' && value.trim()) || !['Critical', 'High', 'Normal'].includes(priority)) {
+  if (![category, title, message].every(value => typeof value === 'string' && value.trim()) || !['Critical', 'High', 'Normal', 'Low'].includes(priority)) {
     return res.status(400).json({ error: 'category, priority, title, and message are required.' });
   }
 
@@ -82,6 +84,8 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   if (publish !== undefined && typeof publish !== 'boolean') return res.status(400).json({ error: 'publish must be a boolean.' });
   if (barangayIds !== undefined && (!Array.isArray(barangayIds) || barangayIds.some(id => typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(barangayNames, id)))) return res.status(400).json({ error: 'Select valid barangay target areas.' });
 
+  let validity;
+  try { validity=alertValidity(req.body); } catch(error:any) { return res.status(400).json({error:error.message}); }
   try {
     const validBarangayIds = Array.isArray(barangayIds)
       ? Array.from(new Set(barangayIds.filter((id: string) => barangayNames[id])))
@@ -92,6 +96,7 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
 
     const now = new Date();
     const alertData = {
+      ...validity, revision:1,
       alertType: category,
       category,
       priority,
@@ -117,21 +122,12 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
     const displayId = await db.runTransaction(async (transaction) => {
       const displayId = await allocateDisplayId(transaction, db, 'alerts');
       transaction.create(docRef, { ...alertData, displayId });
+      logActionInTransaction(transaction,{...auditActor(req.user!),action:publish?'alert_created_and_published':'alert_created_draft',targetType:'alert',targetId:docRef.id,details:{displayId,validityMode:validity.validityMode,expiresAt:validity.expiresAt?.toISOString() || null}});
       return displayId;
     });
     const createdData = { ...alertData, displayId };
 
-    await logAction({
-      actorId: req.user!.uid,
-      actorName: req.user!.name,
-      actorRole: req.user!.role,
-      actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
-      action: publish ? 'alert_created_and_published' : 'alert_created_draft',
-      targetType: 'alert',
-      targetId: docRef.id,
-      details: { title: createdData.title, category: createdData.category },
-    });
-
+    invalidateFirestoreReadCache('auditLogs:');
     res.status(201).json({ data: { id: docRef.id, ...createdData } });
   } catch (error) {
     console.error('Create alert failed:', error);
@@ -140,106 +136,77 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// PATCH /alerts/:id/publish — hiwalay na endpoint para mag-publish ng draft
-router.patch('/:id/publish', async (req: AuthenticatedRequest, res) => {
-  if (!isMunicipalityAdmin(req.user!.role)) {
-    return res.status(403).json({ error: 'Only municipality administrators can publish alerts.' });
-  }
 
-  try {
-    const alertRef = db.doc(`alerts/${req.params.id}`);
-    const result = await db.runTransaction(async transaction => {
-      const snapshot = await transaction.get(alertRef);
-      if (!snapshot.exists) throw new Error('NOT_FOUND');
-      const data = snapshot.data()!;
-      const status = String(data.status ?? '').toLowerCase();
-      if (status === 'active' || status === 'published') return { changed: false, data };
-      if (status !== 'draft') throw new Error('INVALID_STATE');
-      const now = new Date();
-      const updates = { status: 'published', publishedAt: now, updatedAt: now };
-      transaction.update(alertRef, updates);
-      return { changed: true, data: { ...data, ...updates } };
-    });
-    const updated = { id: alertRef.id };
-    const updatedData = result.data;
-    if (!result.changed) return res.json({ data: { ...updatedData, id: updated.id } });
-
-    await logAction({
-      actorId: req.user!.uid,
-      actorName: req.user!.name,
-      actorRole: req.user!.role,
-      actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
-      action: 'alert_published',
-      targetType: 'alert',
-      targetId: updated.id,
-      details: { title: updatedData.title },
-    });
-
-    res.json({ data: { id: updated.id, ...updatedData } });
-  } catch (error: any) {
-    if (error.message === 'NOT_FOUND') return res.status(404).json({ error: 'Alert not found.' });
-    if (error.message === 'INVALID_STATE') return res.status(409).json({ error: 'Only draft alerts can be published.' });
-    console.error('Publish alert failed:', error);
-    if (respondToFirestoreResourceExhausted(res, error)) return;
-    res.status(500).json({ error: 'Failed to publish alert.' });
-  }
-});
-
-router.patch('/:id', async (req: AuthenticatedRequest, res) => {
-  if (!isMunicipalityAdmin(req.user!.role)) {
-    return res.status(403).json({ error: 'Only municipality administrators can edit drafts.' });
-  }
-  const { category, priority, title, message, barangayIds } = req.body ?? {};
-  if (![category, title, message].every(value => typeof value === 'string' && value.trim())
-    || !['Critical', 'High', 'Normal'].includes(priority)
-    || title.length > 160 || message.length > 5000 || category.length > 100
-    || !Array.isArray(barangayIds)
-    || barangayIds.some(id => typeof id !== 'string' || !Object.prototype.hasOwnProperty.call(barangayNames, id))) {
-    return res.status(400).json({ error: 'Enter valid alert content and target areas.' });
-  }
-  const ids = Array.from(new Set<string>(barangayIds));
-  return changeDraft(req, res, {
-    category, alertType: category, priority, severityLevel: priority,
-    title: title.trim(), message: message.trim(), description: message.trim(),
-    coverageArea: ids.length ? 'barangay' : 'municipality', barangayId: ids[0] ?? null,
-    affectedAreas: ids.length ? ids.map(id => barangayNames[id]) : ['All barangays in Balagtas'],
-    locationScope: { type: ids.length ? 'barangay' : 'municipality', barangayIds: ids },
-    recommendations: defaultRecommendations(category), updatedAt: new Date(),
-  });
-});
-
-router.delete('/:id', async (req: AuthenticatedRequest, res) => {
-  if (!isMunicipalityAdmin(req.user!.role)) {
-    return res.status(403).json({ error: 'Only municipality administrators can delete drafts.' });
-  }
-  return changeDraft(req, res);
-});
-
-// Check status inside the transaction to prevent edits/deletion racing publication.
-async function changeDraft(req: AuthenticatedRequest, res: import('express').Response, updates?: Record<string, unknown>) {
-  try {
-    const ref = db.doc('alerts/' + req.params.id);
-    const data = await db.runTransaction(async transaction => {
-      const snapshot = await transaction.get(ref);
-      if (!snapshot.exists) throw new Error('NOT_FOUND');
-      if (snapshot.data()!.status !== 'draft') throw new Error('INVALID_STATE');
-      if (updates) transaction.update(ref, updates);
-      else transaction.delete(ref);
-      return { ...snapshot.data(), ...updates, id: ref.id };
-    });
-    await logAction({
-      actorId: req.user!.uid, actorName: req.user!.name, actorRole: req.user!.role,
-      actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
-      action: updates ? 'alert_draft_updated' : 'alert_draft_deleted', targetType: 'alert', targetId: ref.id,
-    });
-    return res.json({ data: updates ? data : { id: ref.id } });
-  } catch (error: any) {
-    if (error.message === 'NOT_FOUND') return res.status(404).json({ error: 'Alert not found.' });
-    if (error.message === 'INVALID_STATE') return res.status(409).json({ error: 'Only drafts can be edited or deleted.' });
-    console.error('Draft update failed:', error);
-    if (respondToFirestoreResourceExhausted(res, error)) return;
-    return res.status(500).json({ error: 'Failed to update draft.' });
-  }
+function failure(res:import('express').Response,error:any) {
+ if(error.message==='NOT_FOUND')return res.status(404).json({error:'Alert not found.'});
+ if(['READ_ONLY','INVALID_STATE'].includes(error.message))return res.status(409).json({error:'Expired and deactivated alerts cannot be changed or republished.'});
+ if(error.message==='CONFLICT')return res.status(409).json({error:'This alert changed elsewhere. Refresh before saving.'});
+ if(error.message==='INVALID_VALIDITY')return res.status(409).json({error:'Choose a validity option with a future expiration before publishing.'});
+ if(respondToFirestoreResourceExhausted(res,error))return;
+ console.error('Alert lifecycle update failed:',error?.code || 'unknown');return res.status(500).json({error:'Unable to update this alert.'});
 }
-
+router.patch('/:id/publish',async(req:AuthenticatedRequest,res)=>{
+ if(!isMunicipalityAdmin(req.user!.role))return res.status(403).json({error:'Only municipality administrators can publish alerts.'});
+ try {
+  const ref=db.doc('alerts/'+req.params.id);
+  const data=await db.runTransaction(async transaction=>{
+   const snapshot=await transaction.get(ref);if(!snapshot.exists)throw new Error('NOT_FOUND');
+   const current=snapshot.data()!,state=alertLifecycle(current);
+   if(state==='published')return current;
+   if(state!=='draft')throw new Error('READ_ONLY');
+   if(!['manual','scheduled'].includes(current.validityMode) || (current.validityMode==='scheduled' && (alertTime(current.expiresAt) ?? 0)<=Date.now()))throw new Error('INVALID_VALIDITY');
+   const updates={status:'published',publishedAt:new Date(),updatedAt:new Date(),revision:(current.revision || 0)+1};
+   transaction.update(ref,updates);
+   logActionInTransaction(transaction,{...auditActor(req.user!),action:'alert_published',targetType:'alert',targetId:ref.id});
+   return {...current,...updates};
+  });invalidateFirestoreReadCache('auditLogs:');res.json({data:{...data,id:ref.id}});
+ }catch(error){return failure(res,error);}
+});
+router.patch('/:id/deactivate',async(req:AuthenticatedRequest,res)=>{
+ if(!isMunicipalityAdmin(req.user!.role))return res.status(403).json({error:'Only municipality administrators can deactivate alerts.'});
+ const reason=req.body?.reason;
+ if(typeof reason!=='string'||!reason.trim()||reason.length>1000)return res.status(400).json({error:'Enter a deactivation reason (up to 1,000 characters).'});
+ try{
+  const ref=db.doc('alerts/'+req.params.id);
+  const data=await db.runTransaction(async transaction=>{
+   const snapshot=await transaction.get(ref);if(!snapshot.exists)throw new Error('NOT_FOUND');
+   const current=snapshot.data()!;if(alertLifecycle(current)!=='published')throw new Error('READ_ONLY');
+   const updates={status:'deactivated',deactivatedBy:req.user!.uid,deactivatedByName:req.user!.name,deactivatedAt:new Date(),deactivationReason:reason.trim(),updatedAt:new Date(),revision:(current.revision || 0)+1};
+   transaction.update(ref,updates);
+   logActionInTransaction(transaction,{...auditActor(req.user!),action:'alert_deactivated',targetType:'alert',targetId:ref.id,details:{reason:reason.trim(),previousStatus:current.status,status:'deactivated'}});
+   return {...current,...updates};
+  });invalidateFirestoreReadCache('auditLogs:');res.json({data:{...data,id:ref.id}});
+ }catch(error){return failure(res,error);}
+});
+router.patch('/:id',async(req:AuthenticatedRequest,res)=>{
+ if(!isMunicipalityAdmin(req.user!.role))return res.status(403).json({error:'Only municipality administrators can edit alerts.'});
+ const {category,priority,title,message,barangayIds,expectedRevision}=req.body ?? {};
+ if(![category,title,message].every(value=>typeof value==='string'&&value.trim())||!['Critical','High','Normal','Low'].includes(priority)||title.length>160||message.length>5000||category.length>100||!Array.isArray(barangayIds)||barangayIds.some(id=>typeof id!=='string'||!Object.prototype.hasOwnProperty.call(barangayNames,id))||(expectedRevision!==undefined&&(!Number.isSafeInteger(expectedRevision)||expectedRevision<0)))return res.status(400).json({error:'Enter valid alert content and target areas.'});
+ let validity;try{validity=alertValidity(req.body);}catch(error:any){return res.status(400).json({error:error.message});}
+ const ids=Array.from(new Set<string>(barangayIds));
+ try{
+  const ref=db.doc('alerts/'+req.params.id);
+  const data=await db.runTransaction(async transaction=>{
+   const snapshot=await transaction.get(ref);if(!snapshot.exists)throw new Error('NOT_FOUND');
+   const current=snapshot.data()!,state=alertLifecycle(current);
+   if(!['draft','published'].includes(state))throw new Error('READ_ONLY');
+   if(expectedRevision!==undefined&&expectedRevision!==(current.revision || 0))throw new Error('CONFLICT');
+   if(state==='published'&&category!==current.category&&category!==current.alertType)throw new Error('INVALID_STATE');
+   const updates:Record<string,any>={...validity,category,alertType:category,priority,severityLevel:priority,title:title.trim(),message:message.trim(),description:message.trim(),coverageArea:ids.length?'barangay':'municipality',barangayId:ids[0]||null,affectedAreas:ids.length?ids.map(id=>barangayNames[id]):['All barangays in Balagtas'],locationScope:{type:ids.length?'barangay':'municipality',barangayIds:ids}};
+   if(state==='draft')updates.recommendations=defaultRecommendations(category);
+   const changedFields=Object.keys(updates).filter(key=>key==='expiresAt'?alertTime(current[key])!==alertTime(updates[key]):JSON.stringify(current[key])!==JSON.stringify(updates[key]));
+   if(!changedFields.length)return current;
+   Object.assign(updates,{updatedAt:new Date(),updatedBy:req.user!.uid,revision:(current.revision || 0)+1});
+   transaction.update(ref,updates);
+   const auditView=(record:any)=>Object.fromEntries(changedFields.map(key=>[key,key==='expiresAt'?(alertTime(record[key])===null?null:new Date(alertTime(record[key])!).toISOString()):record[key] ?? null]));
+   logActionInTransaction(transaction,{...auditActor(req.user!),action:state==='draft'?'alert_draft_updated':'alert_updated',targetType:'alert',targetId:ref.id,details:{changedFields,before:auditView(current),after:auditView(updates)}});
+   return {...current,...updates};
+  });invalidateFirestoreReadCache('auditLogs:');res.json({data:{...data,id:ref.id}});
+ }catch(error){return failure(res,error);}
+});
+// Draft deletion remains available. Published and historical records can never be deleted.
+router.delete('/:id',async(req:AuthenticatedRequest,res)=>{
+ if(!isMunicipalityAdmin(req.user!.role))return res.status(403).json({error:'Only municipality administrators can delete drafts.'});
+ try{const ref=db.doc('alerts/'+req.params.id);await db.runTransaction(async transaction=>{const snapshot=await transaction.get(ref);if(!snapshot.exists)throw new Error('NOT_FOUND');if(alertLifecycle(snapshot.data())!=='draft')throw new Error('READ_ONLY');transaction.delete(ref);logActionInTransaction(transaction,{...auditActor(req.user!),action:'alert_draft_deleted',targetType:'alert',targetId:ref.id});});invalidateFirestoreReadCache('auditLogs:');res.json({data:{id:ref.id}});}catch(error){return failure(res,error);}
+});
 export default router;

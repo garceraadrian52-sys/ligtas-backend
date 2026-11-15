@@ -1,3 +1,4 @@
+import {alertTime} from './alertLifecycle';
 import { createHash } from 'node:crypto';
 import { Timestamp, FieldValue, type DocumentReference } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
@@ -18,7 +19,7 @@ function timestampMillis(value: any) {
 }
 
 function recentlyPublished(alert: any) {
-  const time = timestampMillis(alert.publishedAt ?? alert.createdAt);
+  const time = timestampMillis(alert.deactivatedAt ?? alert.updatedAt ?? alert.publishedAt ?? alert.createdAt);
   if (time === null) return false;
   const age = Date.now() - time;
   return age >= -5 * 60 * 1000 && age <= ALERT_RECOVERY_WINDOW_MS;
@@ -144,20 +145,21 @@ function startAlertWatcher(onReady?: () => void) {
       // Recover recent manual publications if the long-running Render service
       // started or woke after the alert was saved. Stable delivery IDs avoid
       // replaying a revision that already obtained a push ticket.
-      if (initial && alert.automatic !== true && !(published(alert) && recentlyPublished(alert))) continue;
+      const cancelled=alert.status==='deactivated'&&Boolean(alert.deactivatedAt);
+      if (initial && alert.automatic !== true && !((published(alert)||cancelled) && recentlyPublished(alert))) continue;
       alertCache.set(change.doc.id, alert);
 
       console.log(`Alert change [${change.type}] id=${change.doc.id} status=${alert.status}`);
 
-      if (!published(alert)) {
+      if (!published(alert) && !cancelled) {
         console.log(`Alert ${change.doc.id} not published (status=${alert.status}), skipping.`);
         continue;
       }
       console.log(`Processing published alert: ${change.doc.id}`);
 
       const alertRevisionId = alertRevision(change.doc.id, alert);
-      const inboxTitle = `Alert published: ${String(alert.title ?? 'LigTAS advisory').slice(0, 100)}`;
-      const inboxBody = `${String(alert.message ?? alert.description ?? '').slice(0, 350)} Open the alert management page for details.`;
+      const inboxTitle = `${cancelled?'Alert cancelled':'Alert updated/published'}: ${String(alert.title ?? 'LigTAS advisory').slice(0, 100)}`;
+      const inboxBody = `${String(cancelled?'This alert has been deactivated. '+(alert.deactivationReason || ''):alert.message ?? alert.description ?? '').slice(0, 350)} Open the alert management page for details.`;
 
       const kind = kindForAlert(alert);
       const revision = alertRevisionId;
@@ -174,15 +176,15 @@ function startAlertWatcher(onReady?: () => void) {
           const matches = inArea(alert, userData);
           console.log(`  User ${user.id} (role=${userData.role}, barangayId=${userData.barangayId}): inArea=${matches}`);
           if (['SUPER_ADMIN', 'LGU_ADMIN'].includes(normalizeRole(userData.role))) {
-            await notifyAdmin(user.id, 'alert', change.doc.id, alert.displayId, inboxTitle, inboxBody, alertRevisionId)
+            await notifyAdmin(user.id, 'alert', change.doc.id, alert.displayId, inboxTitle, inboxBody, cancelled?'cancelled:'+alertRevisionId:alertRevisionId)
               .catch((error) => console.error('Queue admin alert inbox notification failed:', error));
           }
           if (matches) {
             await queueForUser(user.id, {
-              kind, targetId: change.doc.id, sourcePath: change.doc.ref.path, revision,
-              title: String(alert.title ?? 'LigTAS advisory').slice(0, 100),
-              body: `${String(alert.message ?? alert.description ?? '').slice(0, 460)} — ${senderName}`,
-            }, `alert:${revision}`, userData);
+              kind, targetId: change.doc.id, sourcePath: change.doc.ref.path, revision,cancelled,
+              title: ((cancelled?'Alert cancelled: ':change.type==='modified'?'Alert updated: ':'')+String(alert.title ?? 'LigTAS advisory')).slice(0, 100),
+              body: `${String(cancelled?'This alert has been deactivated by LGU/MDRRMO. '+(alert.deactivationReason || ''):alert.message ?? alert.description ?? '').slice(0, 460)} — ${senderName}`,
+            }, cancelled?`alert-cancelled:${revision}`:`alert:${revision}`, userData);
           }
         }
         if (page.size < 200) break;
@@ -329,7 +331,7 @@ async function processDelivery(ref: DocumentReference) {
     const source = sourceSnapshot.data();
 
     if (!user || !source || !enabled(user, job.kind) || !device?.enabled) return finish(ref, 'skipped');
-    if (['alert', 'evacuation'].includes(job.kind) && (!published(source) || !inArea(source, user))) return finish(ref, 'skipped');
+    if (['alert', 'evacuation'].includes(job.kind) && (!(job.cancelled ? source.status==='deactivated' && source.deactivatedAt : published(source)) || !inArea(source, user))) return finish(ref, 'skipped');
     if (job.kind === 'emergency') {
       if (!emergencyDeliveryCurrent(job, source, user)) return finish(ref, 'superseded');
     } else if (job.revision && job.revision !== alertRevision(job.targetId, source)) return finish(ref, 'superseded');
@@ -340,7 +342,7 @@ async function processDelivery(ref: DocumentReference) {
     const tickets = await expoRequest('send', [{
       to: device.token, sound: 'default', channelId: 'default',
       title: job.title, body: job.body, data: { userId: job.userId, kind: job.kind, targetId: job.targetId },
-      ttl: Math.min(3600, Math.max(1, Math.floor((job.expiresAt.toMillis() - Date.now()) / 1000))),
+      ttl: Math.min(3600, Math.max(1, Math.floor((Math.min(job.expiresAt.toMillis(),!job.cancelled && ['alert','evacuation'].includes(job.kind) && source.validityMode!=='manual' ? alertTime(source.expiresAt) ?? Infinity : Infinity) - Date.now()) / 1000))),
     }]);
     const ticket = tickets[0];
 
