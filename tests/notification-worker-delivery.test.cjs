@@ -6,6 +6,7 @@ const policy = require('../dist/services/notificationPolicy');
 
 test('a newly published barangay alert queues one eligible device delivery and deduplicates edits', async () => {
   const callbacks = new Map();
+  const inboxSettings = {};
   const jobs = new Map();
   const profiles = [
     { id: 'super-admin', data: () => ({ role: 'SUPER_ADMIN', barangayId: null }) },
@@ -48,12 +49,13 @@ test('a newly published barangay alert queues one eligible device delivery and d
     return query;
   }
 
-  const db = { collection, doc: path => ({ path, id: path.split('/').at(-1), onSnapshot(callback) { callbacks.set(path, callback); } }) };
+  const db = { collection, doc: path => ({ path, id: path.split('/').at(-1), onSnapshot(callback) { callbacks.set(path, callback); }, async get(){return {data:()=>inboxSettings}} }) };
   const exports = {};
   vm.runInNewContext(readFileSync(require.resolve('../dist/services/notificationWorker'), 'utf8'), {
     exports, setInterval: () => 0, console: { log() {}, error() {} }, Date,
     require: name => name === 'node:crypto' ? require(name)
       : name.includes('firebaseAdmin') ? { db }
+        : name.includes('adminNotificationPreferences') ? require('../dist/services/adminNotificationPreferences')
         : name.includes('notificationPolicy') ? policy
           : name.includes('roles') ? require('../dist/services/roles')
           : name.includes('recordDisplayIds') ? { assignDisplayIdIfMissing: async () => null }
@@ -103,6 +105,16 @@ test('a newly published barangay alert queues one eligible device delivery and d
   assert.ok([...jobs.values()].some(job=>job.state==='inbox'&&job.title.startsWith('Alert cancelled:')));
   await callbacks.get('alerts')({docs:[cancelled],size:1,docChanges:()=>[{type:'modified',doc:cancelled}]});
   assert.equal(jobs.size,12,'cancellation replay never duplicates the existing notifications');
+  const originalInbox=[...jobs.values()].filter(job=>job.state==='inbox').length;
+  inboxSettings.notifications={push:true,critical:false,reports:true};
+  const muted={...alert,id:'muted-critical',ref:{path:'alerts/muted-critical'},data:()=>({...alert.data(),priority:'Critical'})};
+  await callbacks.get('alerts')({docs:[muted],size:1,docChanges:()=>[{type:'added',doc:muted}]});
+  assert.equal([...jobs.values()].filter(job=>job.state==='inbox').length,originalInbox,'disabled critical inbox preference is enforced without removing history');
+  assert.ok([...jobs.values()].some(job=>job.targetId==='muted-critical'&&job.userId==='resident-dalig'),'resident delivery preferences remain independent');
+  inboxSettings.notifications={push:true,critical:true,reports:true};
+  const allowed={...muted,id:'allowed-critical',ref:{path:'alerts/allowed-critical'}};
+  await callbacks.get('alerts')({docs:[allowed],size:1,docChanges:()=>[{type:'added',doc:allowed}]});
+  assert.equal([...jobs.values()].filter(job=>job.state==='inbox').length,originalInbox+1,'re-enabled preference queues future admin notifications');
   const mode = { active: true, revision: 1, changedAt: new Date() };
   await callbacks.get('systemSettings/emergencyMode')({ data: () => mode });
   const emergency = [...jobs.values()].filter(job => job.kind === 'emergency');
