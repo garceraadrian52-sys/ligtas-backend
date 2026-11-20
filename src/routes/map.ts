@@ -1,3 +1,4 @@
+import { isResolvedReport } from '../services/reportAnalytics';
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import boundary from '../config/balagtasBoundary.json';
@@ -87,7 +88,7 @@ router.get('/monitoring', async (req: AuthenticatedRequest, res) => {
 
     const reports = await listReports(isLguAdmin ? null : barangayId);
     const floodReports = reports.filter(report => {
-      return report.type === 'flood' || report.reportType === 'flood';
+      return !isResolvedReport(report) && (report.type === 'flood' || report.reportType === 'flood');
     }).map(report => {
       return { id: report.id, location: report.location, description: report.description,
         status: report.status, verification: report.verification, latitude: report.latitude,
@@ -96,7 +97,7 @@ router.get('/monitoring', async (req: AuthenticatedRequest, res) => {
     res.json({
       data: {
         floodReports,
-        roadConditions: roadsSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })),
+        roadConditions: roadsSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })).filter(item => !isResolvedReport(item)),
         evacuationCenters: centersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })),
       },
     });

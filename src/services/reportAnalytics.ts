@@ -52,6 +52,14 @@ export function reportStatus(report: Report): Status {
   return normalize(report.status) ?? normalize(report.verification) ?? 'Other';
 }
 
+export const isResolvedReport = (report: Report): boolean => [report.status, report.verification, report.reportStatus]
+  .some(value => String(value ?? '').trim().toLowerCase() === 'resolved');
+
+export function isActiveVerifiedReport(report: Report): boolean {
+  const values = [report.status, report.verification, report.reportStatus].map(value => String(value ?? '').trim().toLowerCase());
+  return !isResolvedReport(report) && !values.some(value => ['pending','rejected','denied','invalid'].includes(value)) && reportStatus(report) === 'Verified';
+}
+
 export function reportType(report: Report): 'flood' | 'road' | 'other' {
   const raw = text(report.type || report.reportType).toLowerCase();
   if (raw.includes('road')) return 'road';

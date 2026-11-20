@@ -5,6 +5,7 @@ import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../midd
 import { isMunicipalityAdmin } from '../services/roles';
 import { logAction } from '../services/auditLog';
 import { invalidateReportReads, listReports } from '../services/reportReads';
+import { isActiveVerifiedReport } from '../services/reportAnalytics';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 
 import { validText, validDocumentId, validCoordinatePair } from '../services/inputValidation';
@@ -89,6 +90,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
       const currentStatus = String(knownStatus ?? '').toLowerCase();
       if (!resolving && currentStatus === 'resolved') throw new Error('ALREADY_RESOLVED');
       if (status === 'Resolved' && !['verified','approved','resolved'].includes(currentStatus)) throw new Error('NOT_VERIFIED');
+      if (resolving && currentStatus !== 'resolved' && !isActiveVerifiedReport(data)) throw new Error('NOT_VERIFIED');
 
       const roadRef = data.roadConditionId ? db.doc(`roadConditions/${data.roadConditionId}`) : null;
       const roadSnap = roadRef ? await transaction.get(roadRef) : null;

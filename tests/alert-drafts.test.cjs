@@ -1,4 +1,4 @@
-﻿const assert = require('node:assert/strict');
+const assert = require('node:assert/strict');
 const { test, before, after } = require('node:test');
 const express = require('express');
 const records = new Map(); let nextId = 0; let auditFailure=false;
@@ -129,4 +129,19 @@ test('a failed publication audit does not partially normalize or publish a legac
  const id='legacy-audit',saved={...content,status:'draft',publishedAt:null};delete saved.validityMode;records.set('alerts/'+id,saved);auditFailure=true;
  try { assert.equal((await request('/'+id+'/publish','PATCH')).status,500);assert.equal(records.get('alerts/'+id),saved);assert.equal(saved.status,'draft');assert.equal(Object.hasOwn(saved,'validityMode'),false); } finally { auditFailure=false; }
  assert.equal((await request('/'+id+'/publish','PATCH')).status,200);assert.equal(records.get('alerts/'+id).validityMode,'manual');
+});
+
+test('manual expiration stores Expired independently from deactivation and preserves history',async()=>{
+ const created=await request('','POST',{...content,publish:true});const path='/'+created.data.id;
+ assert.equal((await request(path+'/expire','PATCH',{reason:''})).status,400);
+ assert.equal((await request(path+'/expire','PATCH',{reason:'Conditions improved'},'BARANGAY_OFFICIAL')).status,403);
+ const result=await request(path+'/expire','PATCH',{reason:'Conditions improved'});
+ assert.equal(result.status,200);assert.equal(result.data.status,'expired');
+ assert.ok(result.data.expiredAt);assert.equal(result.data.expiredBy,'admin');
+ assert.equal(result.data.deactivatedAt,undefined);
+ assert.equal((await request(path+'/publish','PATCH')).status,409);
+ assert.equal((await request(path+'/expire','PATCH',{reason:'Again'})).status,409);
+ assert.ok((await request()).data.some(item=>item.id===created.data.id));
+ const audit=[...records.values()].filter(item=>item.action==='alert_expired'&&item.targetId===created.data.id);
+ assert.equal(audit.length,1);
 });

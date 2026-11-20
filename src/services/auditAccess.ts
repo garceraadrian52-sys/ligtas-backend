@@ -4,6 +4,7 @@ export function publicAuditLog(log:any) {
     action:log.action || '',module:log.module || auditModule(log.targetType,log.action),targetType:log.targetType || '',targetId:log.targetId || '',outcome:log.outcome || 'not_recorded',details:sanitizeAuditDetails(log.details || {})};
 }
 export function canViewAuditLog(user:{uid:string;role:string},log:any) {
+  if (String(log.actorRole || '').trim().toUpperCase() === 'RESIDENT') return false;
   if(user.role==='SUPER_ADMIN')return true;
   if(user.role!=='LGU_ADMIN')return false;
   return ['Reports','Alerts','Emergency Mode','Evacuation Centers'].includes(log.module || auditModule(log.targetType,log.action)) || log.actorId===user.uid || log.actorRole==='BARANGAY_OFFICIAL' || ['RESIDENT','BARANGAY_OFFICIAL'].includes(log.details?.role);

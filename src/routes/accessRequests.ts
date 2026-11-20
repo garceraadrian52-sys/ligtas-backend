@@ -182,7 +182,10 @@ router.get('/', requireAuth, requireOfficial, async (req: AuthenticatedRequest, 
       .orderBy('createdAt', 'desc')
       .get();
 
-    const requests = snapshot.docs.map(doc => ({
+    const visibleDocuments = req.user!.role === 'SUPER_ADMIN'
+      ? snapshot.docs
+      : snapshot.docs.filter(doc => ['barangay official', 'barangay_official'].includes(String(doc.data().role || '').trim().toLowerCase()));
+    const requests = visibleDocuments.map(doc => ({
       id: doc.id,
       ...doc.data(),
     }));
@@ -242,6 +245,9 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
       }
 
       const request = snapshot.data()!;
+      if (req.user!.role !== 'SUPER_ADMIN' && !['barangay official', 'barangay_official'].includes(String(request.role || '').trim().toLowerCase())) {
+        return { state: 'forbidden' as const };
+      }
 
       const requestEmail = typeof request.email === 'string' ? request.email : '';
       const requestFullName = typeof request.fullName === 'string' ? request.fullName : '';
@@ -291,6 +297,7 @@ router.patch('/:id', requireAuth, requireOfficial, async (req: AuthenticatedRequ
       };
     });
 
+    if (result.state === 'forbidden') return res.status(403).json({ error: 'Only Super Admin can review LGU Staff access requests.' });
     if (result.state === 'missing') {
       return res.status(404).json({
         error: 'Access request not found.',

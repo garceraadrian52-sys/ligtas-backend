@@ -149,10 +149,10 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   }
 });
 
-// PATCH /evacuation-centers/:id — only Super Admin may edit an existing center.
+// Center management is audited and validated here for municipality administrators.
 router.patch('/:id', async (req: AuthenticatedRequest, res) => {
-  if (req.user!.role !== 'SUPER_ADMIN') {
-    return res.status(403).json({ error: 'Only Super Admin can edit evacuation center details.' });
+  if (!isMunicipalityAdmin(req.user!.role)) {
+    return res.status(403).json({ error: 'Only municipality administrators can edit evacuation center details.' });
   }
   const centerId = req.params.id;
   if (!validDocumentId(centerId)) return res.status(400).json({ error: 'Invalid evacuation center ID.' });
@@ -171,6 +171,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
   const contactPerson = typeof body.contactPerson === 'string' ? body.contactPerson.trim() : '';
   const contactNumber = typeof body.contactNumber === 'string' ? body.contactNumber.trim() : '';
   const status = String(body.status ?? '').trim().toUpperCase();
+  const deactivationReason = typeof body.deactivationReason === 'string' ? body.deactivationReason.trim() : '';
   const facilities = body.facilities;
 
   if (!validText(name, 200) || !validText(address, 500) || !validDocumentId(barangayId)) {
@@ -187,6 +188,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
   if (status !== 'OPEN' && status !== 'CLOSED') {
     return res.status(400).json({ error: 'Choose Open or Closed. Full availability is calculated from occupancy.' });
   }
+  if (deactivationReason.length > 1500) return res.status(400).json({ error: 'Deactivation reason must be at most 1500 characters.' });
   if ([contactPerson, contactNumber].some(value => value.length > 500)) {
     return res.status(400).json({ error: 'Contact fields must be at most 500 characters.' });
   }
@@ -215,9 +217,13 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
       if (capacity < occupied) {
         throw updateError(`Capacity cannot be lower than the ${occupied} people currently checked in.`, 409);
       }
-      const currentOperationalStatus = String(current.status ?? 'OPEN').toUpperCase() === 'CLOSED' ? 'CLOSED' : 'OPEN';
-      if (status === 'CLOSED' && currentOperationalStatus !== 'CLOSED' && occupied > 0) {
-        throw updateError('Check out all current occupants before closing this center.', 409);
+      const currentOperationalStatus = ['CLOSED', 'DEACTIVATED', 'INACTIVE', 'UNAVAILABLE', 'MAINTENANCE'].includes(String(current.status ?? 'OPEN').toUpperCase()) ? 'CLOSED' : 'OPEN';
+      if (status === 'CLOSED' && currentOperationalStatus !== 'CLOSED') {
+        if (!deactivationReason) throw updateError('Enter a reason for deactivating this center.', 400);
+        const records = await transaction.get(db.collection('evacuationRecords').where('evacuationCenterId', '==', centerId));
+        if (occupied > 0 || records.docs.some(record => record.data().status !== 'checked_out')) {
+          throw updateError('Check out or transfer all current evacuees before deactivating this center.', 409);
+        }
       }
 
       const before = {
@@ -252,6 +258,15 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
         ...after,
         maxCapacity: capacity,
         updatedAt,
+        ...(status === 'CLOSED' && currentOperationalStatus !== 'CLOSED' ? {
+          deactivationReason,
+          deactivatedAt: updatedAt,
+          deactivatedBy: req.user!.uid,
+        } : {}),
+        ...(status === 'OPEN' && currentOperationalStatus === 'CLOSED' ? {
+          reactivatedAt: updatedAt,
+          reactivatedBy: req.user!.uid,
+        } : {}),
       };
       transaction.update(centerRef, updates);
 
@@ -264,10 +279,10 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
         actorName: req.user!.name,
         actorRole: req.user!.role,
         actorEmail: req.user!.email, actorBarangayId: req.user!.barangayId,
-        action: 'evacuation_center_updated',
+        action: status !== currentOperationalStatus ? (status === 'CLOSED' ? 'evacuation_center_deactivated' : 'evacuation_center_reactivated') : 'evacuation_center_updated',
         targetType: 'evacuationCenter',
         targetId: centerId,
-        details: { displayId: current.displayId ?? null, changedFields, redactedFields, before: auditBefore, after: auditAfter },
+        details: { displayId: current.displayId ?? null, changedFields, redactedFields, before: auditBefore, after: auditAfter, ...(status === 'CLOSED' && currentOperationalStatus !== 'CLOSED' ? { reason: deactivationReason } : {}) },
       });
       return { center: { id: snapshot.id, ...current, ...updates }, changed: true };
     });

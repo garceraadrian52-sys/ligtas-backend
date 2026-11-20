@@ -9,6 +9,7 @@ let center = {
   occupied: 0, currentOccupancy: 0, facilities: ['Restrooms'], contactPerson: 'Old contact',
   contactNumber: '09170000000', status: 'OPEN', displayId: 'EVC0001', updatedAt: new Date('2026-11-09T00:00:00.000Z'),
 };
+let attendanceRecords = [];
 let audit = [];
 let auditSequence = 0;
 const centerRef = { id: center.id, path: `evacuationCenters/${center.id}` };
@@ -20,6 +21,7 @@ const db = {
     throw new Error(`Unexpected document path ${path}`);
   },
   collection(name) {
+    if (name === 'evacuationRecords') return {where(){return {attendanceQuery:true}}};
     if (name === 'auditLogs') return { doc() { const id = `audit-${++auditSequence}`; return { id, path: `auditLogs/${id}` }; } };
     throw new Error(`Unexpected collection ${name}`);
   },
@@ -27,6 +29,7 @@ const db = {
     const writes = [];
     const transaction = {
       async get(reference) {
+        if (reference.attendanceQuery) return {docs: attendanceRecords.map(data => ({data:()=>data}))};
         if (reference.path !== centerRef.path) throw new Error(`Unexpected transaction read ${reference.path}`);
         return { id: center.id, exists: Boolean(center), data: () => ({ ...center }) };
       },
@@ -97,10 +100,11 @@ beforeEach(() => {
     contactNumber: '09170000000', status: 'OPEN', displayId: 'EVC0001', updatedAt: new Date('2026-11-09T00:00:00.000Z'),
   };
   audit = [];
+  attendanceRecords = [];
 });
 
-test('only Super Admin can edit a center', async () => {
-  role = 'LGU_ADMIN';
+test('Barangay Officials cannot edit a center', async () => {
+  role = 'BARANGAY_OFFICIAL';
   const response = await patchCenter();
   assert.equal(response.status, 403);
   assert.equal(center.capacity, 19800);
@@ -136,7 +140,7 @@ test('capacity below current occupancy is rejected without changing center or au
 
 test('closing a center with checked-in occupants and stale edits are rejected', async () => {
   center = { ...center, occupied: 1, currentOccupancy: 1 };
-  const closeResponse = await patchCenter({ status: 'CLOSED' });
+  const closeResponse = await patchCenter({ status: 'CLOSED', deactivationReason:'Building inspection' });
   assert.equal(closeResponse.status, 409);
   assert.equal(center.status, 'OPEN');
   assert.equal(audit.length, 0);
@@ -153,4 +157,28 @@ test('invalid status and unsafe capacity are rejected', async () => {
   const invalidCapacity = await patchCenter({ capacity: Number.MAX_SAFE_INTEGER + 1 });
   assert.equal(invalidCapacity.status, 400);
   assert.equal(audit.length, 0);
+});
+
+
+test('LGU Admin can edit, deactivate with a reason, and reactivate an empty center', async () => {
+  role = 'LGU_ADMIN';
+  assert.equal((await patchCenter()).status, 200);
+  const closed = await patchCenter({ status: 'CLOSED', deactivationReason: 'Building inspection' });
+  assert.equal(closed.status, 200);
+  assert.equal(center.deactivationReason, 'Building inspection');
+  assert.equal(audit.at(-1).action, 'evacuation_center_deactivated');
+  assert.equal(audit.at(-1).details.reason, 'Building inspection');
+  assert.equal((await patchCenter({status:'OPEN'})).status, 200);
+  assert.equal(center.status, 'OPEN');
+  assert.equal(audit.at(-1).action, 'evacuation_center_reactivated');
+});
+
+test('deactivation requires a reason and checks attendance even when saved occupancy is zero', async () => {
+  assert.equal((await patchCenter({status:'CLOSED'})).status, 400);
+  attendanceRecords = [{status:'checked_in', peopleCount:1}];
+  assert.equal((await patchCenter({status:'CLOSED', deactivationReason:'Inspection'})).status, 409);
+  assert.equal(center.status, 'OPEN');
+  assert.equal(audit.length, 0);
+  attendanceRecords = [{status:'checked_out', peopleCount:1}];
+  assert.equal((await patchCenter({status:'CLOSED', deactivationReason:'Inspection'})).status, 200);
 });

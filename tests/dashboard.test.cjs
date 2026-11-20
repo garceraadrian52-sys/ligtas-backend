@@ -29,3 +29,12 @@ test('dashboard returns up to five unique active alerts in priority order with f
  assert.deepEqual(result.recentAlerts[1].locationScope,newest.locationScope);
  assert.deepEqual(result.recentAlerts[1].recommendations,newest.recommendations);
 });
+
+test('resolved and invalid reports are excluded from current verified counts while total history is retained', () => {
+ const now=Date.parse('2026-11-20T04:00:00Z');
+ const base={verifiedAt:new Date(now)};
+ const reports=[{...base,status:'Verified',verification:'Verified'}, {...base,status:'Resolved',verification:'Verified'}, {...base,status:'Verified',verification:'Resolved'}, {...base,status:'Invalid',verification:'Verified'}];
+ const result=summarizeDashboard(reports,[],[],now);
+ assert.equal(result.verifiedToday,1);
+ assert.equal(result.totalReports,4);
+});

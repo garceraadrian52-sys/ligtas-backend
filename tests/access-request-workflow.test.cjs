@@ -134,6 +134,11 @@ require.cache[require.resolve('../dist/services/recordDisplayIds')] = {
 };
 require.cache[require.resolve('../dist/services/accessRequestEmail')] = {
   exports: {
+    async sendAccountRegistrationEmail(message) {
+      assert.equal(rows.get('accessRequests/request-001')?.status, 'Approved');
+      mailCalls.push(message);
+      if (mailFailure) throw mailFailure;
+    },
     async sendAccessRequestRejectionEmail(message) {
       mailCalls.push(message);
       if (mailFailure) throw mailFailure;
@@ -254,6 +259,9 @@ test('request registration creates Auth and profile and approves the linked requ
   const payload = await response.json();
   assert.equal(response.status, 201);
   assert.equal(payload.data.email, 'applicant@example.test');
+  assert.equal(payload.notification.emailSent, true);
+  assert.equal(mailCalls.length, 1);
+  assert.equal(mailCalls[0].email, 'applicant@example.test');
   assert.equal(authUsers.size, 1);
   assert.equal(rows.get(`users/${payload.data.id}`).role, 'LGU_ADMIN');
   assert.equal(rows.get('accessRequests/request-001').status, 'Approved');
@@ -271,7 +279,20 @@ test('simultaneous duplicate registrations cannot create duplicate Auth accounts
   assert.equal(rows.get('accessRequests/request-001').status, 'Approved');
   assert.equal([...rows.keys()].filter(path => path.startsWith('users/')).length, 1);
   assert.equal(authUsers.size, 1);
+  assert.equal(mailCalls.length, 1);
   assert.equal([...rows.keys()].filter(path => path.startsWith('auditLogs/')).length, 1);
+});
+
+test('registration email failure preserves the approved account and reports delivery failure', async () => {
+  addPendingRequest();
+  mailFailure = Object.assign(new Error('SMTP unavailable'), { code: 'ECONNECTION' });
+  const response = await register();
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.equal(payload.notification.emailSent, false);
+  assert.equal(payload.notification.emailStatus, 'failed');
+  assert.equal(rows.get('accessRequests/request-001').status, 'Approved');
+  assert.equal(authUsers.size, 1);
 });
 
 test('approval rechecks request status inside the transaction and cleans up the new Auth account on a race', async () => {
@@ -494,4 +515,28 @@ test('rejection email recipient comes from the saved request and cannot be overr
  addPendingRequest('saved-address',{email:'actual.applicant@example.test'});
  const response=await reject('saved-address',{status:'Rejected',rejectionReason:'Official appointment must be provided.',email:'different@example.test'});
  assert.equal(response.status,200);assert.equal(mailCalls.length,1);assert.equal(mailCalls[0].email,'actual.applicant@example.test');assert.equal(mailCalls[0].reason,'Official appointment must be provided.');
+});
+
+test('LGU Admin cannot list or reject LGU Staff requests but can review BO requests', async () => {
+  addPendingRequest();
+  role = 'LGU_ADMIN';
+  const listed = await fetch(base + '/access-requests');
+  assert.equal(listed.status, 200);
+  assert.deepEqual((await listed.json()).data, []);
+  const denied = await fetch(base + '/access-requests/request-001', {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status:'Rejected', rejectionReason:'Review'})});
+  assert.equal(denied.status, 403);
+  assert.equal(rows.get('accessRequests/request-001').status, 'Pending');
+  assert.equal(mailCalls.length, 0);
+  rows.set('accessRequests/request-001', {...rows.get('accessRequests/request-001'), role:'Barangay Official'});
+  const visible = await fetch(base + '/access-requests');
+  assert.equal((await visible.json()).data.length, 1);
+});
+
+test('municipal account creation discards legacy barangay values', async () => {
+  addPendingRequest();
+  const response = await register({barangayId:'legacy-unrecognized-barangay'});
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.equal(payload.data.barangayId, null);
+  assert.equal(rows.get('users/'+payload.data.id).barangayId, null);
 });

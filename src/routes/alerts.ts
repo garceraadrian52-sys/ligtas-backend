@@ -163,6 +163,35 @@ router.patch('/:id/publish',async(req:AuthenticatedRequest,res)=>{
   });invalidateFirestoreReadCache('auditLogs:');res.json({data:{...data,id:ref.id}});
  }catch(error){return failure(res,error);}
 });
+router.patch('/:id/expire', async (req: AuthenticatedRequest, res) => {
+  if (!isMunicipalityAdmin(req.user!.role)) return res.status(403).json({ error: 'Only municipality administrators can expire alerts.' });
+  if (!validDocumentId(req.params.id)) return res.status(400).json({ error: 'Invalid alert ID.' });
+  const reason = req.body?.reason;
+  if (typeof reason !== 'string' || !reason.trim() || reason.length > 1000) return res.status(400).json({ error: 'Enter an expiration reason (up to 1,000 characters).' });
+  try {
+    const ref = db.doc('alerts/' + req.params.id);
+    const data = await db.runTransaction(async transaction => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists) throw new Error('NOT_FOUND');
+      const current = snapshot.data()!;
+      if (alertLifecycle(current) !== 'published') throw new Error('READ_ONLY');
+      const now = new Date();
+      const updates = {
+        status: 'expired', expiresAt: now, expiredAt: now,
+        expiredBy: req.user!.uid, expiredByName: req.user!.name,
+        expirationReason: reason.trim(), updatedAt: now, revision: (current.revision || 0) + 1,
+      };
+      transaction.update(ref, updates);
+      logActionInTransaction(transaction, {
+        ...auditActor(req.user!), action: 'alert_expired', targetType: 'alert', targetId: ref.id,
+        details: { reason: reason.trim(), previousStatus: current.status, status: 'expired' },
+      });
+      return { ...current, ...updates };
+    });
+    invalidateFirestoreReadCache('auditLogs:');
+    res.json({ data: { ...data, id: ref.id } });
+  } catch (error) { return failure(res, error); }
+});
 router.patch('/:id/deactivate',async(req:AuthenticatedRequest,res)=>{
  if(!isMunicipalityAdmin(req.user!.role))return res.status(403).json({error:'Only municipality administrators can deactivate alerts.'});
  const reason=req.body?.reason;

@@ -37,3 +37,14 @@ test('center registration rejects incomplete coordinates and invalid occupancy b
     assert.equal(response.status,400);
   }
 });
+
+test('resolved floods and road mirrors are omitted from monitoring without deleting their source records', async () => {
+ collections.reports.push({id:'resolved-flood',type:'flood',status:'Resolved',verification:'Verified'});
+ collections.roadConditions.push({id:'resolved-road',status:'Not Passable',verification:'Verified',reportStatus:'Resolved'});
+ require('../dist/services/reportReads').invalidateReportReads();
+ const response=await fetch(base+'/map/monitoring');
+ const {data}=await response.json();
+ assert.ok(!data.floodReports.some(item=>item.id==='resolved-flood'));
+ assert.ok(!data.roadConditions.some(item=>item.id==='resolved-road'));
+ assert.ok(collections.reports.some(item=>item.id==='resolved-flood'));
+});

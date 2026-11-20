@@ -1,3 +1,4 @@
+import { isActiveVerifiedReport } from './reportAnalytics';
 import { alertLifecycle, alertPriority } from './alertLifecycle';
 type RecordData = Record<string, any>;
 export function dateMillis(value: any): number {
@@ -49,7 +50,7 @@ export function summarizeDashboard(reports: RecordData[], alerts: RecordData[], 
   const centerList = centers.map(item => ({ id: item.id, name: item.name || 'Evacuation center', status: item.status || 'Unknown', occupied: count(item.currentOccupancy ?? item.occupied ?? item.occupancyCount), capacity: count(item.capacity ?? item.maxCapacity) }));
   return {
     pendingReports: reports.filter(item => String(item.verification ?? item.status).toLowerCase() === 'pending').length,
-    verifiedToday: reports.filter(item => String(item.verification ?? item.status).toLowerCase() === 'verified' && dateMillis(item.verifiedAt) > 0 && localDay(dateMillis(item.verifiedAt)) === localDay(now)).length,
+    verifiedToday: reports.filter(item => isActiveVerifiedReport(item) && dateMillis(item.verifiedAt) > 0 && localDay(dateMillis(item.verifiedAt)) === localDay(now)).length,
     totalReports: reports.length,
     activeAlerts: active.length,
     updatedAt: new Date(now).toISOString(),

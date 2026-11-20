@@ -10,3 +10,14 @@ test('email includes the requester, rejected decision and complete reason in tex
 test('missing configuration prevents sending',async()=>{delete process.env.SMTP_PASS;await assert.rejects(()=>sendAccessRequestRejectionEmail(request),{code:'ACCESS_REQUEST_EMAIL_NOT_CONFIGURED'});assert.equal(messages.length,0);});
 test('provider rejection or failure cannot be reported as a sent email',async()=>{mode='rejected';await assert.rejects(()=>sendAccessRequestRejectionEmail(request),{code:'ACCESS_REQUEST_EMAIL_REJECTED'});assert.equal(closed,1);mode='failed';await assert.rejects(()=>sendAccessRequestRejectionEmail(request),{code:'ECONNECTION'});assert.equal(closed,2);});
 test('invalid stored recipient is rejected before contacting SMTP',async()=>{await assert.rejects(()=>sendAccessRequestRejectionEmail({...request,email:'invalid'}),{code:'ACCESS_REQUEST_EMAIL_INVALID_RECIPIENT'});assert.equal(messages.length,0);});
+
+test('registration email confirms successful account creation without including credentials', async () => {
+  const { sendAccountRegistrationEmail } = require('../dist/services/accessRequestEmail');
+  await sendAccountRegistrationEmail({ email: request.email, fullName: request.fullName, role: request.role });
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].to, 'applicant@example.test');
+  assert.match(messages[0].subject, /registered/);
+  assert.match(messages[0].text, /registered successfully/);
+  assert.match(messages[0].html, /Applicant &lt;Example&gt;/);
+  assert.equal(closed, 1);
+});

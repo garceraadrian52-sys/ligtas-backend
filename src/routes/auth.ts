@@ -28,6 +28,8 @@ router.post('/forgot-password', async (req, res) => {
   }
 
   try {
+    const account = await auth.getUserByEmail(email.trim());
+    if (account.disabled) return res.status(403).json({ error: 'This account has been disabled. Contact your administrator.' });
     const response = await fetch(
       `https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=${FIREBASE_WEB_API_KEY}`,
       {
@@ -39,17 +41,25 @@ router.post('/forgot-password', async (req, res) => {
     );
     const result: any = await response.json();
     const providerError = String(result?.error?.message ?? '');
-    // Do not disclose whether a particular address has a LigTAS account.
-    if (['EMAIL_NOT_FOUND', 'USER_DISABLED', 'INVALID_EMAIL', 'TOO_MANY_ATTEMPTS_TRY_LATER'].includes(providerError)) {
-      return res.status(202).json({ data: { accepted: true } });
-    }
+    if (providerError === 'EMAIL_NOT_FOUND') return res.status(404).json({ error: 'No registered account uses this email address.' });
+    if (providerError === 'USER_DISABLED') return res.status(403).json({ error: 'This account has been disabled. Contact your administrator.' });
+    if (providerError === 'INVALID_EMAIL') return res.status(400).json({ error: 'Enter a valid email address.' });
+    if (providerError.startsWith('TOO_MANY_ATTEMPTS')) return res.status(429).json({ error: 'Too many requests. Please try again later.' });
     if (!response.ok) {
       console.error('Firebase password reset request failed:', providerError || response.status);
       return res.status(503).json({ error: 'Password reset is temporarily unavailable. Please try again later.' });
     }
-    await logAction({actorId:'',actorName:'Not recorded',actorRole:'UNAUTHENTICATED',action:'password_reset_requested',targetType:'user',targetId:'',details:{source:'authentication_provider'}});
+    try {
+      const profile = (await db.doc(`users/${account.uid}`).get()).data();
+      if (profile && normalizeRole(profile.role) !== 'RESIDENT') {
+        await logAction({actorId:'',actorName:'Not recorded',actorRole:'UNAUTHENTICATED',action:'password_reset_requested',targetType:'user',targetId:account.uid,details:{source:'authentication_provider'}});
+      }
+    } catch (auditError: any) {
+      console.error('Password reset audit lookup unavailable:', auditError?.code || 'unknown');
+    }
     return res.status(202).json({ data: { accepted: true } });
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.code === 'auth/user-not-found') return res.status(404).json({ error: 'No registered account uses this email address.' });
     console.error('Password reset request failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;
     return res.status(503).json({ error: 'Password reset is temporarily unavailable. Please try again later.' });

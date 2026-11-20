@@ -7,6 +7,7 @@ import { invalidateFirestoreReadCache } from '../services/firestoreReadCache';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { firebaseAuthPhotoUrl, isValidEmail, isValidProfilePhoto } from '../services/profileFields';
 import { allocateDisplayId } from '../services/recordDisplayIds';
+import { sendAccountRegistrationEmail } from '../services/accessRequestEmail';
 import { normalizeRole, SUPER_ADMIN_ROLE_VALUES } from '../services/roles';
 import { recordAuthenticatedActivity, recordAuthenticatedLogin, shouldTrackAuthenticatedActivity } from '../services/activityTracking';
 
@@ -218,7 +219,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
           position: item.position ?? '',
           ...(role !== 'RESIDENT' ? { photoURL: item.photoURL ?? item.photoUrl ?? null } : {}),
           role,
-          barangayId: item.barangayId ?? (role === 'RESIDENT' ? item.barangay ?? null : null),
+          barangayId: ['LGU_ADMIN', 'SUPER_ADMIN'].includes(role) ? null : item.barangayId ?? (role === 'RESIDENT' ? item.barangay ?? null : null),
           disabled: item.disabled === true,
           lastActiveAt: item.lastActiveAt ?? null,
           lastLoginAt: item.lastLoginAt ?? null,
@@ -248,10 +249,10 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
   if (!accountRoles.includes(role)) return res.status(400).json({ error: 'Choose Super Admin, LGU Admin, or Barangay Official.' });
   if (password.length < 12) return res.status(400).json({ error: 'Password must be at least 12 characters.' });
   if (role === 'BARANGAY_OFFICIAL' && !validDocumentId(barangayId)) return res.status(400).json({ error: 'A valid barangay assignment is required for officials.' });
-  if (barangayId != null && !validDocumentId(barangayId)) return res.status(400).json({ error: 'Invalid barangay ID.' });
+  if (role === 'BARANGAY_OFFICIAL' && barangayId != null && !validDocumentId(barangayId)) return res.status(400).json({ error: 'Invalid barangay ID.' });
 
   try {
-    if (barangayId && !(await db.doc(`barangays/${barangayId}`).get()).exists) {
+    if (role === 'BARANGAY_OFFICIAL' && barangayId && !(await db.doc(`barangays/${barangayId}`).get()).exists) {
       return res.status(400).json({ error: 'Barangay does not exist.' });
     }
 
@@ -337,7 +338,24 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       await removeCreatedAuthAccount(userRecord.uid);
       throw auditError;
     }
-    res.status(201).json({ data: { id: userRecord.uid, ...profile, accountId: displayId, displayId } });
+    let notification;
+    if (accessRequestRef) {
+      try {
+        await sendAccountRegistrationEmail({
+          email: profile.email,
+          fullName: profile.name,
+          role: role === 'LGU_ADMIN' ? 'LGU Staff' : 'Barangay Official',
+        });
+        notification = { emailSent: true, emailStatus: 'accepted' };
+      } catch (emailError: any) {
+        notification = {
+          emailSent: false,
+          emailStatus: emailError?.code === 'ACCESS_REQUEST_EMAIL_NOT_CONFIGURED' ? 'not_configured' : 'failed',
+        };
+        console.error('Account registration email failed:', emailError?.code || 'unknown');
+      }
+    }
+    res.status(201).json({ data: { id: userRecord.uid, ...profile, accountId: displayId, displayId }, ...(notification ? { notification } : {}) });
   } catch (error: any) {
     console.error('Create user failed:', error);
     if (error.code === 'auth/email-already-exists') return res.status(409).json({ error: 'This email is already registered.' });

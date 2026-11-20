@@ -30,6 +30,7 @@ export function auditRecord(params: AuditParams) {
     details:sanitizeAuditDetails(params.details || {}),outcome:params.outcome || 'success',timestamp:new Date()};
 }
 export async function logAction(params: AuditParams) {
+  if (String(params.actorRole).trim().toUpperCase() === 'RESIDENT') return;
   try {
     const record = auditRecord(params);
     if (params.eventId) await db.collection('auditLogs').doc(createHash('sha256').update(params.eventId).digest('hex')).create(record);
@@ -38,6 +39,7 @@ export async function logAction(params: AuditParams) {
   } catch (error:any) { if (error?.code !== 6 && error?.code !== 'already-exists') console.error('Audit write unavailable:',error?.code || 'unknown'); }
 }
 export function logActionInTransaction(transaction: Transaction, params: AuditParams) {
+  if (String(params.actorRole).trim().toUpperCase() === 'RESIDENT') return null;
   const reference=(params.eventId ? db.collection('auditLogs').doc(createHash('sha256').update(params.eventId).digest('hex')) : db.collection('auditLogs').doc());
   transaction.create(reference,auditRecord(params));return reference;
 }
