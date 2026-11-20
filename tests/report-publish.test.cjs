@@ -1,7 +1,8 @@
 const assert=require('node:assert/strict');const {test,before,after}=require('node:test');const express=require('express');
-let alert,writeCount=0,audits=0,createdReport,displayCounter=0;
+let alert,writeCount=0,audits=0,createdReport,displayCounter=0,authCreateCalls=0;
 const db={doc(path){return {id:path.split('/').pop(),path,async get(){return {exists:true,data:()=>({})}}}},collection(name){return {doc(){const id='new-report';return {id,path:`${name}/${id}`}},async add(data){createdReport=data;return {id:'report',async get(){return {id:'report',data:()=>data}}}}}},async runTransaction(callback){const writes=[];const transaction={async get(ref){if(ref.path==='recordIdCounters/reports')return {exists:displayCounter>0,data:()=>({lastIssued:displayCounter})};return {exists:!!alert,data:()=>alert}},set(ref,data){writes.push(['set',ref,data])},create(ref,data){writes.push(['create',ref,data])},update(ref,updates){writes.push(['update',ref,updates])}};const result=await callback(transaction);for(const [kind,ref,data] of writes){if(ref.path==='recordIdCounters/reports')displayCounter=data.lastIssued;if(kind==='create'&&ref.path.startsWith('reports/'))createdReport=data;if(kind==='update'){writeCount++;alert={...alert,...data}}}return result}};
-require.cache[require.resolve('../dist/config/firebaseAdmin')]={exports:{db}};
+const auth={async createUser(){authCreateCalls++;assert.fail('Invalid account input must be rejected before Firebase Auth account creation.');}};
+require.cache[require.resolve('../dist/config/firebaseAdmin')]={exports:{db,auth}};
 require.cache[require.resolve('../dist/middleware/auth')]={exports:{requireAuth(req,res,next){req.user={role:req.get('x-role')||'LGU_ADMIN',uid:'tester',name:'Tester'};next()},requireOfficial(req,res,next){next()}}};
 require.cache[require.resolve('../dist/services/auditLog')]={exports:{async logAction(){audits++},auditActor(user){return {actorId:user.uid,actorName:user.name,actorRole:user.role}},logActionInTransaction(){audits++}}};
 const app=express();app.use(express.json());app.use('/alerts',require('../dist/routes/alerts').default);app.use('/reports',require('../dist/routes/reports').default);app.use('/users',require('../dist/routes/users').default);let server,base;
@@ -16,7 +17,9 @@ test('report inputs reject malformed fields and retain valid map coordinates',as
 });
 
 test('Super Admin account creation rejects malformed names/passwords and unassigned officials',async()=>{
- for(const invalid of [{name:{}},{password:{}},{name:' '},{role:'BARANGAY_OFFICIAL'},{barangayId:'bad/path'}]){
- const response=await fetch(base+'/users',{method:'POST',headers:{'Content-Type':'application/json','x-role':'SUPER_ADMIN'},body:JSON.stringify({name:'Test',email:'test@example.com',password:'long-test-password',role:'LGU_ADMIN',...invalid})});assert.equal(response.status,400);
+ authCreateCalls=0;
+ for(const invalid of [{name:{}},{password:{}},{name:' '},{role:'BARANGAY_OFFICIAL'},{role:'BARANGAY_OFFICIAL',barangayId:'bad/path'},{role:'BARANGAY_OFFICIAL',barangayId:null},{role:'BARANGAY_OFFICIAL',barangayId:{}}]){
+ const response=await fetch(base+'/users',{method:'POST',headers:{'Content-Type':'application/json','x-role':'SUPER_ADMIN'},body:JSON.stringify({name:'Test',email:'test@example.com',password:'long-test-password',role:'LGU_ADMIN',...invalid})});assert.equal(response.status,400,JSON.stringify(invalid));
+ assert.equal(authCreateCalls,0,'Invalid input must not create an Authentication account.');
  }
 });

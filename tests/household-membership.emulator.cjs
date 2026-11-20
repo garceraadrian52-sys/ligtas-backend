@@ -79,11 +79,13 @@ test('official QR attendance uses stable member IDs after approval and keeps his
   };
   const validation = load('src/services/validation.ts');
   const plan = load('src/services/attendanceValidation.ts');
+  const centerMetrics = load('src/services/evacuationCenterMetrics.ts');
   let save;
   const attendance = load('src/services/attendance.ts', {
     'firebase/firestore': firestore, '@/services/firebase': { db: client, auth: { currentUser: { uid: 'official' } } },
     '@/services/outbox': { registerOutboxHandler: (kind, callback) => { assert.equal(kind, 'checkin'); save = callback; } },
     '@/services/attendanceValidation': plan, '@/services/readTimeout': { readWithTimeout: promise => promise }, '@/services/validation': validation,
+    '@/services/evacuationCenterMetrics': centerMetrics,
   });
   try {
     await Promise.all([

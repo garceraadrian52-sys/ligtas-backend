@@ -540,3 +540,58 @@ test('municipal account creation discards legacy barangay values', async () => {
   assert.equal(payload.data.barangayId, null);
   assert.equal(rows.get('users/'+payload.data.id).barangayId, null);
 });
+
+test('Super Admin creates municipal accounts without requiring or assigning a barangay', async () => {
+  rows.set('barangays/barangay_borol_1st', { name: 'Borol 1st' });
+  const barangays = [undefined, null, '', 'barangay_borol_1st', 'legacy-unrecognized-barangay', 'bad/path'];
+  for (const accountRole of ['LGU_ADMIN', 'SUPER_ADMIN']) {
+    for (const barangayId of barangays) {
+      const response = await register({
+        role: accountRole, barangayId, accessRequestId: undefined,
+        email: `municipal-${nextUserId}@example.test`,
+      });
+      assert.equal(response.status, 201, `${accountRole}: ${String(barangayId)}`);
+      const { data } = await response.json();
+      assert.equal(data.role, accountRole);
+      assert.equal(data.barangayId, null);
+      assert.equal(rows.get(`users/${data.id}`).role, accountRole);
+      assert.equal(rows.get(`users/${data.id}`).barangayId, null);
+      assert.equal(authUsers.get(data.id).uid, data.id);
+    }
+  }
+});
+
+test('Barangay Official account creation requires a valid existing barangay', async () => {
+  for (const barangayId of [undefined, null, '', {}, 'bad/path', '.', '..', 'missing']) {
+    const response = await register({ role: 'BARANGAY_OFFICIAL', barangayId, accessRequestId: undefined });
+    assert.equal(response.status, 400, JSON.stringify(barangayId));
+    assert.equal(authUsers.size, 0);
+    assert.equal(rows.size, 0);
+    assert.equal(audits.length, 0);
+  }
+  rows.set('barangays/barangay_borol_1st', { name: 'Borol 1st' });
+  const response = await register({
+    role: 'BARANGAY_OFFICIAL', barangayId: 'barangay_borol_1st', accessRequestId: undefined,
+  });
+  assert.equal(response.status, 201);
+  const { data } = await response.json();
+  assert.equal(data.role, 'BARANGAY_OFFICIAL');
+  assert.equal(data.barangayId, 'barangay_borol_1st');
+  assert.equal(rows.get(`users/${data.id}`).barangayId, 'barangay_borol_1st');
+});
+
+test('Municipal barangay compatibility never authorizes account creation by other roles', async () => {
+  rows.set('barangays/barangay_borol_1st', { name: 'Borol 1st' });
+  for (const callerRole of ['LGU_ADMIN', 'BARANGAY_OFFICIAL', 'RESIDENT']) {
+    role = callerRole;
+    for (const accountRole of ['LGU_ADMIN', 'SUPER_ADMIN', 'BARANGAY_OFFICIAL']) {
+      const response = await register({
+        role: accountRole, barangayId: 'barangay_borol_1st', accessRequestId: undefined,
+      });
+      assert.equal(response.status, 403, `${callerRole} creating ${accountRole}`);
+      assert.equal(authUsers.size, 0);
+      assert.equal(rows.size, 1);
+      assert.equal(audits.length, 0);
+    }
+  }
+});
