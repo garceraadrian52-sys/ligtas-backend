@@ -4,6 +4,8 @@ import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
 import { auditActor, logAction } from '../services/auditLog';
 import { areNotificationWorkersStarted } from '../services/notificationWorker';
+import { isMunicipalityAdmin } from '../services/roles';
+import { version as packageVersion } from '../../package.json';
 
 const router = Router();
 router.use(requireAuth);
@@ -18,6 +20,15 @@ const defaultPreferences = {
 const notificationKeys = ['email', 'push', 'critical', 'reports'] as const;
 const backupCollections = ['users', 'reports', 'alerts', 'evacuationCenters', 'roadConditions'] as const;
 const backupRecordLimit = 500;
+
+function responsePreferences(stored: any, role: string) {
+  if (isMunicipalityAdmin(role)) return {
+    theme: typeof stored.theme === 'boolean' ? stored.theme : false,
+    notifications: Object.fromEntries(['push','critical','reports'].map(key => [key, typeof stored.notifications?.[key] === 'boolean' ? stored.notifications[key] : true])),
+  };
+  // Preserve legacy non-administrative clients while keeping removed web settings out of the admin API.
+  return { ...defaultPreferences, ...stored, notifications:{...defaultPreferences.notifications,...(stored.notifications??{})} };
+}
 
 function isSuperAdmin(req: AuthenticatedRequest, res: any) {
   if (req.user?.role === 'SUPER_ADMIN') return true;
@@ -41,11 +52,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
   try {
     const snapshot = await db.doc(`userSettings/${req.user!.uid}`).get();
     const stored = snapshot.data() ?? {};
-    res.json({ data: {
-      ...defaultPreferences,
-      ...stored,
-      notifications: { ...defaultPreferences.notifications, ...(stored.notifications ?? {}) },
-    } });
+    res.json({ data: responsePreferences(stored, req.user!.role) });
   } catch (error) {
     console.error('Load settings failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;
@@ -56,7 +63,7 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
 router.patch('/', async (req: AuthenticatedRequest, res) => {
   const body = req.body ?? {};
   const updates: Record<string, unknown> = {};
-  const allowedKeys = ['theme', 'autoBackup', 'language', 'timezone', 'notifications'];
+  const allowedKeys = isMunicipalityAdmin(req.user!.role) ? ['theme', 'notifications'] : ['theme', 'autoBackup', 'language', 'timezone', 'notifications'];
   if (Object.keys(body).some(key => !allowedKeys.includes(key))) {
     return res.status(400).json({ error: 'One or more settings are not supported.' });
   }
@@ -79,7 +86,7 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
   if ('notifications' in body) {
     const preferences = body.notifications;
     if (!preferences || typeof preferences !== 'object' || Array.isArray(preferences)
-      || Object.keys(preferences).some(key => !notificationKeys.includes(key as typeof notificationKeys[number]))
+      || Object.keys(preferences).some(key => !notificationKeys.includes(key as typeof notificationKeys[number]) || (isMunicipalityAdmin(req.user!.role) && key === 'email'))
       || Object.values(preferences).some(value => typeof value !== 'boolean')) {
       return res.status(400).json({ error: 'Notification preferences are invalid.' });
     }
@@ -95,11 +102,7 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
     if(changedFields.length) await logAction({...auditActor(req.user!),action:'settings_updated',targetType:'settings',targetId:req.user!.uid,details:{changedFields}});
     const snapshot = await ref.get();
     const stored = snapshot.data() ?? {};
-    res.json({ data: {
-      ...defaultPreferences,
-      ...stored,
-      notifications: { ...defaultPreferences.notifications, ...(stored.notifications ?? {}) },
-    } });
+    res.json({ data: responsePreferences(stored, req.user!.role) });
   } catch (error) {
     console.error('Save settings failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;
@@ -159,17 +162,25 @@ router.post('/backup', async (req: AuthenticatedRequest, res) => {
 });
 
 router.get('/system-status', async (req: AuthenticatedRequest, res) => {
-  if (!isSuperAdmin(req, res)) return;
+  if (!isMunicipalityAdmin(req.user!.role)) return res.status(403).json({ error: 'Only municipality administrators can view system information.' });
+  res.set('Cache-Control', 'no-store');
   let database: 'online' | 'unavailable' = 'online';
+  let probeTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await db.doc('systemSettings/statusProbe').get();
+    await Promise.race([
+      db.doc('systemSettings/statusProbe').get(),
+      new Promise((_, reject) => { probeTimer=setTimeout(()=>reject(new Error('Database probe timed out')),5000); }),
+    ]);
   } catch {
     database = 'unavailable';
+  } finally {
+    if(probeTimer)clearTimeout(probeTimer);
   }
   const configuredUpdatedAt = process.env.LIGTAS_LAST_UPDATED;
   const parsedUpdatedAt = configuredUpdatedAt ? Date.parse(configuredUpdatedAt) : NaN;
   res.json({ data: {
-    version: process.env.LIGTAS_SYSTEM_VERSION || '1.0',
+    version: process.env.LIGTAS_SYSTEM_VERSION?.trim() || packageVersion,
+    checkedAt: new Date().toISOString(),
     lastUpdated: Number.isFinite(parsedUpdatedAt) ? new Date(parsedUpdatedAt).toISOString() : null,
     api: 'online',
     database,

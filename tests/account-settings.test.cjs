@@ -181,3 +181,17 @@ test('self-service profile updates reject attempts to change account role', asyn
   assert.match(payload.error, /role changes use separate authorized workflows/);
   assert.equal(documentUpdates.length, 0);
 });
+
+test('municipality-level profiles cannot acquire barangay assignments through Settings',async()=>{
+ for(const adminRole of ['SUPER_ADMIN','LGU_ADMIN']){
+  role=adminRole;accountProfile.role=adminRole;
+  const response=await request('','PATCH',{name:'Admin',barangayId:'barangay_santol'});
+  assert.equal(response.status,200);assert.equal((await response.json()).data.barangayId,null);assert.equal(documentUpdates.at(-1).barangayId,null);
+ }
+});
+test('unchanged or short administrative passwords are rejected before Firebase reauthentication',async()=>{
+ for(const password of ['short','existing-password','            ']){
+  const response=await request('/password','PATCH',{currentPassword:'existing-password',newPassword:password});assert.equal(response.status,400);
+ }
+ assert.equal(identityRequests.length,0);
+});

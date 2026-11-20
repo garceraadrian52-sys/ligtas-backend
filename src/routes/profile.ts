@@ -101,7 +101,7 @@ async function syncVerifiedPendingEmail(uid: string, profile: Record<string, any
 // GET /profile. A pending email is synchronized only after Firebase confirms it.
 router.get('/', async (req: AuthenticatedRequest, res) => {
   const profile = await syncVerifiedPendingEmail(req.user!.uid, req.profile!);
-  res.json({ data: { id: req.user!.uid, ...profile, email: profile.email ?? req.user!.email, role: req.user!.role } });
+  res.json({ data: { id: req.user!.uid, ...profile, email: profile.email ?? req.user!.email, role: req.user!.role, ...(isMunicipalityAdmin(req.user!.role) ? {barangayId:null} : {}) } });
 });
 
 // PATCH /profile. Email changes must use the verified workflow below.
@@ -122,7 +122,7 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
       return res.status(403).json({ error: 'Barangay Officials cannot change their own assignment.' });
     }
     if (photoURL !== undefined && !isValidProfilePhoto(photoURL)) return res.status(400).json({ error: 'Choose a valid profile image.' });
-    if (typeof barangayId === 'string' && barangayId !== req.user!.barangayId && !(await db.doc(`barangays/${barangayId}`).get()).exists) {
+    if (!isMunicipalityAdmin(req.user!.role) && typeof barangayId === 'string' && barangayId !== req.user!.barangayId && !(await db.doc(`barangays/${barangayId}`).get()).exists) {
       return res.status(400).json({ error: 'Barangay does not exist.' });
     }
 
@@ -131,7 +131,7 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
     // Empty optional fields do not erase a previously saved value by accident.
     if (phone !== undefined && (phone.trim() || !String(req.profile?.phone ?? '').trim())) updates.phone = phone.trim();
     if (address !== undefined && (address.trim() || !String(req.profile?.address ?? '').trim())) updates.address = address.trim();
-    if (barangayId !== undefined) updates.barangayId = barangayId;
+    if (barangayId !== undefined) updates.barangayId = isMunicipalityAdmin(req.user!.role) ? null : barangayId;
     if (photoURL !== undefined) updates.photoURL = photoURL;
 
     const authUpdates: Record<string, unknown> = {};
@@ -142,7 +142,7 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
 
     await db.doc(`users/${req.user!.uid}`).update(updates);
     await logAction({...auditActor(req.user!),action:'profile_updated',targetType:'user',targetId:req.user!.uid,details:{changedFields:Object.keys(updates).filter(key=>key!=='updatedAt')}});
-    res.json({ data: { id: req.user!.uid, ...req.profile!, ...updates, email: req.profile?.email ?? req.user!.email, role: req.user!.role } });
+    res.json({ data: { id: req.user!.uid, ...req.profile!, ...updates, email: req.profile?.email ?? req.user!.email, role: req.user!.role, ...(isMunicipalityAdmin(req.user!.role) ? {barangayId:null} : {}) } });
   } catch (error) {
     console.error('Update profile failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;
@@ -154,7 +154,7 @@ router.patch('/', async (req: AuthenticatedRequest, res) => {
 router.post('/email/change', async (req: AuthenticatedRequest, res) => {
   if (!isMunicipalityAdmin(req.user!.role)) return res.status(403).json({ error: 'Only Super Admin or LGU Admin can change an administrative account email.' });
   const { currentPassword, newEmail: emailInput } = req.body ?? {};
-  if (typeof currentPassword !== 'string' || !currentPassword || !isValidEmail(emailInput)) {
+  if (typeof currentPassword !== 'string' || !currentPassword || currentPassword.length > 4096 || !isValidEmail(emailInput)) {
     return res.status(400).json({ error: 'Enter your current password and a valid new email address.' });
   }
   const newEmail = emailInput.trim().toLowerCase();
@@ -192,7 +192,7 @@ router.post('/email/sync', async (req: AuthenticatedRequest, res) => {
       updatedAt: Timestamp.now(),
     };
     await db.doc(`users/${req.user!.uid}`).update(updates);
-    res.json({ data: { id: req.user!.uid, ...req.profile!, ...updates, role: req.user!.role } });
+    res.json({ data: { id: req.user!.uid, ...req.profile!, ...updates, role: req.user!.role, barangayId:null } });
   } catch (error: any) {
     console.error('Synchronize verified profile email failed:', error?.code ?? 'unknown');
     if (respondToFirestoreResourceExhausted(res, error)) return;
@@ -204,9 +204,10 @@ router.post('/email/sync', async (req: AuthenticatedRequest, res) => {
 // PATCH /profile/password. The current password creates a fresh Firebase Auth token before update.
 router.patch('/password', async (req: AuthenticatedRequest, res) => {
   const { currentPassword, newPassword } = req.body ?? {};
-  if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < (isMunicipalityAdmin(req.user!.role) ? 12 : 8) || newPassword.length > 4096) {
+  if (typeof currentPassword !== 'string' || !currentPassword || currentPassword.length > 4096 || typeof newPassword !== 'string' || !newPassword.trim() || newPassword.length < (isMunicipalityAdmin(req.user!.role) ? 12 : 8) || newPassword.length > 4096) {
     return res.status(400).json({ error: 'Enter your current password and a new password with at least 12 characters.' });
   }
+  if (newPassword === currentPassword) return res.status(400).json({ error: 'Choose a different new password.' });
   if (!process.env.FIREBASE_WEB_API_KEY) return res.status(503).json({ error: 'Password changes are temporarily unavailable.' });
 
   try {

@@ -27,6 +27,22 @@ export function kindForAlert(data: any) {
   return /evac/i.test(`${data.category ?? ''} ${data.alertType ?? ''}`) ? 'evacuation' : 'alert';
 }
 
+/** Delivery priority comes from the current server record, never from the recipient. */
+export function pushPresentation(job: any, source: any, device: any, deliveryId: string) {
+  const alert = ['alert', 'evacuation'].includes(job.kind);
+  const alertPriority = String(source.priority ?? source.severityLevel ?? source.severity ?? '').trim().toLowerCase();
+  const urgent = alert && ['high', 'critical'].includes(alertPriority);
+  const currentChannels = device.platform === 'android' && device.notificationChannelVersion === 1;
+  return {
+    channelId: alert && currentChannels ? urgent ? 'ligtas-alerts-urgent-v1' : 'ligtas-alerts-standard-v1' : 'default',
+    priority: alert ? urgent ? 'high' : 'normal' : 'default',
+    sound: 'default',
+    // Identical delivery retries replace the same Android tray entry.
+    tag: `ligtas:${deliveryId}`,
+    data: { userId: job.userId, kind: job.kind, targetId: job.targetId, notificationId: deliveryId, ...(alert ? {alertPriority} : {}) },
+  };
+}
+
 export function enabled(user: any, kind: string) {
   if (user.disabled === true) return false;
   const key = ({ alert: 'Flood Alerts', emergency: 'Flood Alerts', evacuation: 'Evacuation Updates', report: 'Report Updates', household: 'Household Updates' } as Record<string, string>)[kind];

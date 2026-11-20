@@ -2,9 +2,10 @@ import {alertTime} from './alertLifecycle';
 import { createHash } from 'node:crypto';
 import { Timestamp, FieldValue, type DocumentReference } from 'firebase-admin/firestore';
 import { db } from '../config/firebaseAdmin';
-import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision, emergencyModeRevision, emergencyDeliveryCurrent, householdDeliveryCurrent } from './notificationPolicy';
+import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision, emergencyModeRevision, emergencyDeliveryCurrent, householdDeliveryCurrent, pushPresentation } from './notificationPolicy';
 import { assignDisplayIdIfMissing } from './recordDisplayIds';
 import { MUNICIPAL_ADMIN_ROLE_VALUES, normalizeRole } from './roles';
+import { allowsAdminNotification } from './adminNotificationPreferences';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const now = () => Timestamp.now();
@@ -60,7 +61,8 @@ async function queueForUser(uid: string, payload: any, revision: string, knownPr
   }
 }
 
-async function notifyAdmin(uid: string, kind: string, targetId: string, displayId: string | undefined, title: string, body: string, eventKey = targetId) {
+async function notifyAdmin(uid: string, kind: string, targetId: string, displayId: string | undefined, title: string, body: string, eventKey = targetId, priority?: unknown) {
+  if (!allowsAdminNotification((await db.doc(`userSettings/${uid}`).get()).data(), kind, priority)) return;
   const targetPath = kind === 'report' ? '/Reports_Management' : '/Alerts_Management';
   const id = hash(`admin-inbox:${kind}:${targetId}:${eventKey}:${uid}`);
   try {
@@ -176,7 +178,7 @@ function startAlertWatcher(onReady?: () => void) {
           const matches = inArea(alert, userData);
           console.log(`  User ${user.id} (role=${userData.role}, barangayId=${userData.barangayId}): inArea=${matches}`);
           if (['SUPER_ADMIN', 'LGU_ADMIN'].includes(normalizeRole(userData.role))) {
-            await notifyAdmin(user.id, 'alert', change.doc.id, alert.displayId, inboxTitle, inboxBody, cancelled?'cancelled:'+alertRevisionId:alertRevisionId)
+            await notifyAdmin(user.id, 'alert', change.doc.id, alert.displayId, inboxTitle, inboxBody, cancelled?'cancelled:'+alertRevisionId:alertRevisionId, alert.priority ?? alert.severityLevel ?? alert.severity)
               .catch((error) => console.error('Queue admin alert inbox notification failed:', error));
           }
           if (matches) {
@@ -340,8 +342,8 @@ async function processDelivery(ref: DocumentReference) {
     if (!/^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/.test(device.token)) return finish(ref, 'failed', 'Invalid device token');
 
     const tickets = await expoRequest('send', [{
-      to: device.token, sound: 'default', channelId: 'default',
-      title: job.title, body: job.body, data: { userId: job.userId, kind: job.kind, targetId: job.targetId },
+      to: device.token, ...pushPresentation(job, source, device, ref.id),
+      title: job.title, body: job.body,
       ttl: Math.min(3600, Math.max(1, Math.floor((Math.min(job.expiresAt.toMillis(),!job.cancelled && ['alert','evacuation'].includes(job.kind) && source.validityMode!=='manual' ? alertTime(source.expiresAt) ?? Infinity : Infinity) - Date.now()) / 1000))),
     }]);
     const ticket = tickets[0];
