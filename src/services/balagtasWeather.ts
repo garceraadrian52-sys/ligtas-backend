@@ -16,19 +16,26 @@ export function normalizeWeather(payload: any, now = Date.now()) {
   const current=payload?.current;
   const observed=numeric(current?.time,0,8640000000000);
   if (observed===null || observed*1000>now+15*60000 || now-observed*1000>2*3600000) throw new Error('Weather response is missing a recent timestamp.');
+  // Open-Meteo may omit individual model variables. Reject an invalid metric,
+  // not the other usable readings, and never guess a missing value or unit.
   const units=payload.current_units;
-  if (units?.temperature_2m!=='°C' || units?.wind_speed_10m!=='km/h' || units?.relative_humidity_2m!=='%' || units?.visibility!=='m') throw new Error('Unexpected weather units.');
-  const temperatureC=numeric(current.temperature_2m,-60,65),humidity=numeric(current.relative_humidity_2m,0,100),windKmh=numeric(current.wind_speed_10m,0,500),visibilityM=numeric(current.visibility,0,500000);
-  if (temperatureC===null || humidity===null || windKmh===null) throw new Error('Weather response is incomplete.');
+  const temperatureC=units?.temperature_2m==='°C'?numeric(current.temperature_2m,-60,65):null;
+  const humidity=units?.relative_humidity_2m==='%'?numeric(current.relative_humidity_2m,0,100):null;
+  const windKmh=units?.wind_speed_10m==='km/h'?numeric(current.wind_speed_10m,0,500):null;
+  const visibilityM=units?.visibility==='m'?numeric(current.visibility,0,500000):null;
+  const weatherCode=Number.isInteger(current.weather_code)?numeric(current.weather_code,0,99):null;
   const times=payload.hourly?.time;
   const rain=payload.hourly?.rain,showers=payload.hourly?.showers;
   const indices=Array.isArray(times)?times.flatMap((time:unknown,index:number)=>typeof time==='number'&&time>observed-86400&&time<=observed?[index]:[]):[];
-  const validRain=indices.length===24 && payload.hourly_units?.rain==='mm' && payload.hourly_units?.showers==='mm' && indices.every((index:number)=>numeric(rain?.[index],0,3000)!==null&&numeric(showers?.[index],0,3000)!==null);
+  const validRain=indices.length===24 && payload.hourly_units?.rain==='mm' && payload.hourly_units?.showers==='mm'
+    && indices.every((index:number,position:number)=>(position===0 || times[index]-times[indices[position-1]]===3600)
+      && numeric(rain?.[index],0,3000)!==null&&numeric(showers?.[index],0,3000)!==null);
   const rain24hMm=validRain?Math.round(indices.reduce((sum:number,index:number)=>sum+rain[index]+showers[index],0)*10)/10:null;
-  const [condition,icon]=descriptions[current.weather_code] || ['Condition unavailable','☁️'];
+  if ([temperatureC,humidity,windKmh,visibilityM,rain24hMm,weatherCode].every(value=>value===null)) throw new Error('Weather response has no usable readings.');
+  const [condition,icon]=weatherCode===null?['Condition unavailable','☁️']:(descriptions[weatherCode] || ['Condition unavailable','☁️']);
   return {status:'available' as 'available'|'stale',location:BALAGTAS_LOCATION,source:{name:'Open-Meteo',url:'https://open-meteo.com/',kind:'Weather model estimate'},
     observedAt:new Date(observed*1000).toISOString(),retrievedAt:new Date(now).toISOString(),temperatureC,humidity,windKmh,visibilityKm:visibilityM===null?null:Math.round(visibilityM/100)/10,
-    rain24hMm,condition,icon,weatherCode: numeric(current.weather_code,0,99),grid:{latitude:payload.latitude??null,longitude:payload.longitude??null},
+    rain24hMm,condition,icon,weatherCode,grid:{latitude:payload.latitude??null,longitude:payload.longitude??null},
     note:'Model estimates for the fixed Balagtas location; not a local weather-station measurement.',error:null as string|null};
 }
 
@@ -40,9 +47,17 @@ export function createBalagtasWeatherService(fetcher: typeof fetch = fetch, cloc
   async function refresh() {
     try {
       const response=await fetcher(weatherUrl(),{signal:AbortSignal.timeout(8000),headers:{Accept:'application/json'}});
-      if (!response.ok) throw new Error('Weather service unavailable.');
+      if (!response.ok) throw Object.assign(new Error('Weather service unavailable.'),{status:response.status});
       cached=normalizeWeather(await response.json(),clock());retryAfter=0;return cached;
-    } catch {retryAfter=clock()+60000;return fallback();}
+    } catch (error) {
+      // Do not log request headers, response bodies or credentials.
+      const status=(error as {status?:unknown})?.status;
+      console.warn('Balagtas weather refresh failed.', {
+        reason:typeof status==='number'?'upstream-http':error instanceof Error && ['TimeoutError','AbortError'].includes(error.name)?'timeout':'invalid-response-or-network',
+        ...(typeof status==='number'?{status}:{}),
+      });
+      retryAfter=clock()+60000;return fallback();
+    }
     finally {inFlight=null;}
   }
   return {async get() {
