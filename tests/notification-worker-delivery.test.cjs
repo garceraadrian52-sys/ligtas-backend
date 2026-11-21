@@ -6,6 +6,7 @@ const policy = require('../dist/services/notificationPolicy');
 
 test('a newly published barangay alert queues one eligible device delivery and deduplicates edits', async () => {
   const callbacks = new Map();
+  let reportInvalidations = 0;
   const inboxSettings = {};
   const jobs = new Map();
   const profiles = [
@@ -56,6 +57,7 @@ test('a newly published barangay alert queues one eligible device delivery and d
     require: name => name === 'node:crypto' ? require(name)
       : name.includes('firebaseAdmin') ? { db }
         : name.includes('adminNotificationPreferences') ? require('../dist/services/adminNotificationPreferences')
+        : name.includes('reportReads') ? { invalidateReportReads: () => { reportInvalidations++; } }
         : name.includes('notificationPolicy') ? policy
           : name.includes('roles') ? require('../dist/services/roles')
           : name.includes('recordDisplayIds') ? { assignDisplayIdIfMissing: async () => null }
@@ -66,6 +68,9 @@ test('a newly published barangay alert queues one eligible device delivery and d
   });
 
   exports.startNotificationWorkers();
+  await callbacks.get('reports')({docs:[],size:0,docChanges:()=>[]});
+  await callbacks.get('reports')({docs:[],size:0,docChanges:()=>[]});
+  assert.equal(reportInvalidations,2,'the existing report listener invalidates HTTP caches without a second listener');
   const publishedAt = new Date();
   const recoveredAlert = {
     id: 'recent-alert-id', ref: { path: 'alerts/recent-alert-id' },

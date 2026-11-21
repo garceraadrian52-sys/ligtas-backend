@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, type AuthenticatedRequest } from '../middleware/auth';
 import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors';
+import { Timestamp } from 'firebase-admin/firestore';
+import { validDocumentId } from '../services/inputValidation';
 
 const router = Router();
 router.use(requireAuth);
@@ -10,6 +12,48 @@ router.use(requireAuth);
 // Missing read fields in older delivery records count as unread.
 router.get('/inbox', async (req: AuthenticatedRequest, res) => {
   try {
+    // Opt-in pagination preserves the response expected by older clients.
+    if (req.query.pageSize !== undefined) {
+      const size=Number(req.query.pageSize), cursor=req.query.cursor;
+      if (typeof req.query.pageSize!=='string' || !Number.isInteger(size) || size<1 || size>100 || (cursor!==undefined && !validDocumentId(cursor)))
+        return res.status(400).json({error:'Invalid notification page.'});
+      const owner=db.collection('notificationDeliveries').where('userId','==',req.user!.uid);
+      const fields=['title','body','description','kind','type','createdAt','read','targetId','targetPath','displayId'];
+      const position=cursor ? await db.doc('notificationDeliveries/'+cursor).get() : null;
+      if(position && (!position.exists || position.data()?.userId!==req.user!.uid)) return res.status(400).json({error:'Invalid notification page.'});
+      let page;
+      try {
+        page=await db.runTransaction(async transaction=>{
+        const total=await transaction.get(owner.count());
+        if(total.data().count===0) return {items:[],unreadCount:0,hasMore:false,nextCursor:null};
+        const [read,dated]=await Promise.all([transaction.get(owner.where('read','==',true).count()),
+          transaction.get(owner.orderBy('createdAt','desc').where('createdAt','>=',Timestamp.fromMillis(0)).count())]);
+        // Missing/legacy date fields must remain reachable, including old unread records.
+        if(total.data().count===dated.data().count){
+          let ordered=owner.orderBy('createdAt','desc');
+          if(position) ordered=ordered.startAfter(position);
+          const snapshot=await transaction.get(ordered.select(...fields).limit(size+1));
+          const items=snapshot.docs.slice(0,size).map(doc=>({...doc.data(),id:doc.id}));
+          return {items,unreadCount:total.data().count-read.data().count,hasMore:snapshot.docs.length>size,
+            nextCursor:snapshot.docs.length>size?items.at(-1)?.id:null};
+        }
+        return undefined;
+        },{readOnly:true});
+      } catch(error:any){
+        if(error.code!==9 && error.code!=='failed-precondition') throw error;
+        console.warn('Notification pagination index unavailable; retaining compatible inbox reads.',{code:'index-unavailable'});
+      }
+      if(!page){
+        const snapshot=await owner.select(...fields).get();
+        const milliseconds=(value:any)=>value?.toMillis?.() ?? (value?.seconds ? value.seconds*1000 : Date.parse(value)||0);
+        const all=snapshot.docs.map(doc=>({...doc.data(),id:doc.id})).sort((a:any,b:any)=>milliseconds(b.createdAt)-milliseconds(a.createdAt)||a.id.localeCompare(b.id));
+        const offset=position?all.findIndex(item=>item.id===position.id)+1:0;
+        const items=all.slice(offset,offset+size), hasMore=all.length>offset+size;
+        page={items,unreadCount:all.filter((item:any)=>item.read!==true).length,hasMore,nextCursor:hasMore?items.at(-1)?.id:null};
+      }
+      res.set('Cache-Control','no-store');
+      return res.json({data:page});
+    }
     const snapshot = await db.collection('notificationDeliveries').where('userId', '==', req.user!.uid)
       .select('title', 'body', 'description', 'kind', 'type', 'createdAt', 'read', 'targetId', 'targetPath', 'displayId').get();
     const items = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));

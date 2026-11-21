@@ -97,6 +97,7 @@ router.get('/monitoring', async (req: AuthenticatedRequest, res) => {
     });
     res.json({
       data: {
+        ...(req.query.includeReports === '1' ? { reports } : {}),
         floodReports,
         roadConditions: roadsSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })).filter(item => !isResolvedReport(item)),
         evacuationCenters: centersSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() })),

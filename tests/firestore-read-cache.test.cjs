@@ -59,6 +59,16 @@ test('failed Firestore reads are not cached', async () => {
   assert.equal(calls, 2);
 });
 
+test('an invalidated request cannot overwrite a newer cache entry after the newer request finishes', async () => {
+  let finishOld;
+  const old = cachedFirestoreRead('reports:race', () => new Promise(resolve => { finishOld = resolve; }));
+  await Promise.resolve();
+  invalidateFirestoreReadCache('reports:');
+  assert.deepEqual(await cachedFirestoreRead('reports:race', async () => ['new']), ['new']);
+  finishOld(['old']); await old;
+  assert.deepEqual(await cachedFirestoreRead('reports:race', async () => ['unexpected reload']), ['new']);
+});
+
 test('successful read entries expire after their configured TTL', async () => {
   let calls = 0;
   const load = async () => ++calls;

@@ -53,3 +53,14 @@ test('map exposes incident support counts while preserving report coordinates an
  collections.reports.push({id:'incident-report',type:'flood',status:'Verified',verification:'Verified',latitude:14.81,longitude:120.91,incidentId:'group',incidentReportCount:2,incidentReportIds:['incident-report','support']},{id:'urgent-pending',type:'flood',status:'Pending',priority:'Critical'});require('../dist/services/reportReads').invalidateReportReads();
  const {data}=await (await fetch(base+'/map/monitoring')).json();const grouped=data.floodReports.find(item=>item.id==='incident-report');assert.equal(grouped.incidentReportCount,2);assert.equal(grouped.latitude,14.81);assert.equal(data.floodReports.find(item=>item.id==='urgent-pending').priority,'Critical');
 });
+
+test('an opt-in monitoring bundle reuses the scoped reports already read by the map',async()=>{
+ role='BARANGAY_OFFICIAL';queries.length=0;
+ require('../dist/services/reportReads').invalidateReportReads();
+ const {data}=await (await fetch(base+'/map/monitoring?includeReports=1')).json();
+ assert.ok(Array.isArray(data.reports));
+ assert.ok(data.reports.some(item=>item.id==='urgent-pending'));
+ assert.equal(queries.filter(item=>item.name==='reports').length,1);
+ assert.ok(queries.every(item=>item.value==='wawa'));
+ assert.equal((await (await fetch(base+'/map/monitoring')).json()).data.reports,undefined);
+});
