@@ -51,3 +51,12 @@ test('bad month filters are rejected and database errors are never successful ze
 test('evacuation failures remain unavailable without suppressing authorized flood analytics',async()=>{
  role='LGU_ADMIN';failActive=true;const response=await get();const {data}=await response.json();assert.equal(response.status,200);assert.equal(data.overview.total,1);assert.equal(data.overview.evacuation.activeAvailable,false);assert.equal(data.overview.evacuation.totalEvacuees,null);assert.equal(data.overview.evacuation.centersAvailable,true);failActive=false;
 });
+
+test('global filters update summaries, rankings, exports and trends together',async()=>{
+ role='LGU_ADMIN';const {data}=await(await get('?reportType=road&barangayId=wawa&start=2026-10-01&end=2026-10-01')).json();assert.equal(data.total,1);assert.equal(data.overview.total,1);assert.equal(data.overview.metrics[0][1],'Total Road Reports');assert.equal(data.overview.metrics[3][1],'Confirmed Incidents');assert.equal(data.overview.trend.reduce((sum,row)=>sum+row.total,0),1);assert.equal(data.overview.incidents.individualReports,1);assert.ok(data.overview.csvRows.some(row=>row[0]==='Report type'&&row[1]==='road'));
+ for(const query of ['?start=2026-02-30','?start=2026-11-22&end=2026-11-21','?reportType=invalid'])assert.equal((await get(query)).status,400);
+ role='BARANGAY_OFFICIAL';barangayId='wawa';assert.equal((await get('?barangayId=san-juan')).status,403);
+});
+test('moved evacuation analytics respect role scope and retain current occupancy calculations',async()=>{
+ role='BARANGAY_OFFICIAL';barangayId='wawa';const response=await fetch(base.replace('/reports','/evacuation'),{headers:{Authorization:'Bearer test'}});const {data}=await response.json();assert.equal(data.totalEvacuees,3);assert.equal(data.utilization.length,1);assert.equal(data.utilization[0].occupied,3);
+});

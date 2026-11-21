@@ -1,3 +1,6 @@
+import { loadCenterAttendanceSummary } from '../services/centerAttendanceSummary';
+import { createHash } from 'node:crypto';
+import { resolveReportBarangay, ReportLocationError } from '../services/reportBarangay';
 import { Router } from 'express';
 import { db } from '../config/firebaseAdmin';
 import { requireAuth, requireOfficial, type AuthenticatedRequest } from '../middleware/auth';
@@ -27,7 +30,7 @@ router.post('/:id/household', (req: AuthenticatedRequest, res) =>
 router.post('/:id/attendance', (req: AuthenticatedRequest, res) =>
   attendanceOperation(res, () => recordAttendance(db, req.user!.uid, String(req.params.id), req.body)));
 router.post('/:id/attendance/:recordId/checkout', (req: AuthenticatedRequest, res) =>
-  attendanceOperation(res, () => checkoutCenterAttendance(db, req.user!.uid, String(req.params.id), String(req.params.recordId))));
+  attendanceOperation(res, () => checkoutCenterAttendance(db, req.user!.uid, String(req.params.id), String(req.params.recordId), req.body?.memberIds)));
 
 function timestampVersion(value: any): string | null {
   if (value === null || value === undefined) return null;
@@ -72,6 +75,11 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
 
 // GET /evacuation-centers/:id/occupants — live, checked-in household members.
 router.get('/:id/occupants', async (req: AuthenticatedRequest, res) => {
+  if(req.query.summary==='1') {
+    res.set('Cache-Control','no-store');
+    try {return res.json({data:await loadCenterAttendanceSummary(db,req.user!,String(req.params.id))});}
+    catch(error:any){return res.status(error.status||503).json({error:error.status?error.message:'Active evacuee records are temporarily unavailable.'});}
+  }
   try {
     const center = await db.doc(`evacuationCenters/${req.params.id}`).get();
     if (!center.exists) return res.status(404).json({ error: 'Evacuation center not found.' });
@@ -112,24 +120,30 @@ router.get('/:id/occupants', async (req: AuthenticatedRequest, res) => {
   }
 });
 
+router.get('/location-barangay', (req, res) => {
+ try { res.json({data:resolveReportBarangay(Number(req.query.latitude),Number(req.query.longitude))}); }
+ catch (error) { res.status(400).json({error:'Select an unambiguous location inside a Balagtas barangay.'}); }
+});
 // POST /evacuation-centers — LGU_ADMIN lang
 router.post('/', async (req: AuthenticatedRequest, res) => {
   if (!isMunicipalityAdmin(req.user!.role)) {
     return res.status(403).json({ error: 'Only municipality administrators can register evacuation centers.' });
   }
 
-  const { name, barangayId, capacity, address, latitude, longitude, facilities, contactPerson, contactNumber, occupied = 0 } = req.body ?? {};
+  const { name, barangayId, capacity, address, latitude, longitude, facilities, contactPerson, contactNumber, availability = 'Available' } = req.body ?? {};
   if (!validText(name, 200) || !validText(barangayId, 1500) || capacity === undefined) {
     return res.status(400).json({ error: 'name, barangayId, and capacity are required.' });
   }
 
   if ([address, contactPerson, contactNumber].some(value => value != null && (typeof value !== 'string' || value.length > 500))) return res.status(400).json({ error: 'Address and contact fields must be text of at most 500 characters.' });
-  if (!['number', 'string'].includes(typeof capacity) || !['number', 'string'].includes(typeof occupied) || capacity === null || occupied === null || String(capacity).trim() === '' || String(occupied).trim() === '') return res.status(400).json({ error: 'Capacity and occupancy must be valid whole numbers.' });
-  const hasLat = latitude !== undefined && latitude !== null;
-  const hasLng = longitude !== undefined && longitude !== null;
-  if (!Number.isSafeInteger(Number(capacity)) || Number(capacity) <= 0 || !Number.isSafeInteger(Number(occupied)) || Number(occupied) < 0 || Number(occupied) > Number(capacity)) return res.status(400).json({error: 'Capacity and occupancy must be valid whole numbers.'});
-  if (hasLat !== hasLng || (hasLat && (typeof latitude !== 'number' || !Number.isFinite(latitude) || Math.abs(latitude) > 90 || typeof longitude !== 'number' || !Number.isFinite(longitude) || Math.abs(longitude) > 180))) return res.status(400).json({error: 'Enter valid latitude and longitude together.'});
-  if (typeof barangayId !== 'string' || barangayId.includes('/')) return res.status(400).json({error: 'Invalid barangay ID.'});
+  if (!['Available','Unavailable'].includes(availability)) return res.status(400).json({error:'Select Available or Unavailable.'});
+  if (!['number','string'].includes(typeof capacity) || !Number.isSafeInteger(Number(capacity)) || Number(capacity)<=0) return res.status(400).json({error:'Maximum capacity must be a positive whole number.'});
+  if (!validText(address,500)) return res.status(400).json({error:'Location is required.'});
+  if (contactNumber && !/^(09[0-9]{9}|\+639[0-9]{9})$/.test(contactNumber)) return res.status(400).json({error:'Enter a valid Philippine mobile number.'});
+  let area;
+  try { area=resolveReportBarangay(latitude,longitude); }
+  catch(error) { return res.status(400).json({error:'Select a valid map location inside a Balagtas barangay.'}); }
+  if (area.id!==barangayId) return res.status(400).json({error:'Barangay does not match the selected map location.'});
   try {
     if (!(await db.doc('barangays/' + barangayId).get()).exists) return res.status(400).json({error: 'Barangay does not exist.'});
     const now = new Date();
@@ -141,26 +155,37 @@ router.post('/', async (req: AuthenticatedRequest, res) => {
       longitude: longitude ?? null,
       capacity: Number(capacity),
       maxCapacity: Number(capacity),
-      occupied: Number(occupied),
-      currentOccupancy: Number(occupied),
+      occupied: 0,
+      currentOccupancy: 0,
       facilities: Array.isArray(facilities) ? facilities.filter(value => typeof value === 'string') : [],
       contactPerson: typeof contactPerson === 'string' ? contactPerson : null,
       contactNumber: typeof contactNumber === 'string' ? contactNumber : null,
-      status: 'OPEN',
+      occupancyCount: 0,
+      status: availability === 'Available' ? 'OPEN' : 'INACTIVE',
       createdBy: req.user!.uid,
       createdAt: now,
       updatedAt: now,
     };
     const docRef = db.collection('evacuationCenters').doc();
     const displayId = await db.runTransaction(async (transaction) => {
+      const normalizedName=String(name).trim().replace(/\s+/g,' ').toLowerCase();
+      const lock=db.doc('centerRegistrations/'+createHash('sha256').update(barangayId+':'+normalizedName).digest('hex'));
+      const claimed=await transaction.get(lock);
+      const existing=await transaction.get(db.collection('evacuationCenters').where('barangayId','==',barangayId));
+      if (claimed.exists || existing.docs.some(doc=>{
+        const data=doc.data();
+        return String(data.name || data.centerName || '').trim().replace(/\s+/g,' ').toLowerCase()===normalizedName || (typeof data.latitude==='number' && typeof data.longitude==='number' && Math.hypot((data.latitude-latitude)*111000,(data.longitude-longitude)*107000)<10);
+      })) throw Object.assign(new Error('This evacuation center is already registered.'),{status:409});
       const displayId = await allocateDisplayId(transaction, db, 'evacuationCenters');
+      transaction.create(lock,{centerId:docRef.id,createdAt:now});
       transaction.create(docRef, { ...centerData, displayId });
       logActionInTransaction(transaction,{actorId:req.user!.uid,actorName:req.user!.name,actorRole:req.user!.role,actorBarangayId:req.user!.barangayId,action:'evacuation_center_created',targetType:'evacuationCenter',targetId:docRef.id,details:{displayId,capacity:centerData.capacity}});
       return displayId;
     });
     invalidateFirestoreReadCache('auditLogs:');
     res.status(201).json({ data: { id: docRef.id, ...centerData, displayId } });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.status === 409) return res.status(409).json({ error: error.message });
     console.error('Create evacuation center failed:', error);
     if (respondToFirestoreResourceExhausted(res, error)) return;
     res.status(500).json({ error: 'Failed to register evacuation center.' });

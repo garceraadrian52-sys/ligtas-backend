@@ -48,3 +48,8 @@ test('resolved floods and road mirrors are omitted from monitoring without delet
  assert.ok(!data.roadConditions.some(item=>item.id==='resolved-road'));
  assert.ok(collections.reports.some(item=>item.id==='resolved-flood'));
 });
+
+test('map exposes incident support counts while preserving report coordinates and critical pending records',async()=>{
+ collections.reports.push({id:'incident-report',type:'flood',status:'Verified',verification:'Verified',latitude:14.81,longitude:120.91,incidentId:'group',incidentReportCount:2,incidentReportIds:['incident-report','support']},{id:'urgent-pending',type:'flood',status:'Pending',priority:'Critical'});require('../dist/services/reportReads').invalidateReportReads();
+ const {data}=await (await fetch(base+'/map/monitoring')).json();const grouped=data.floodReports.find(item=>item.id==='incident-report');assert.equal(grouped.incidentReportCount,2);assert.equal(grouped.latitude,14.81);assert.equal(data.floodReports.find(item=>item.id==='urgent-pending').priority,'Critical');
+});
