@@ -44,10 +44,10 @@ test('unreviewed reports cannot acquire a resolution event',async()=>{
   actor = { ...actor, role:'BARANGAY_OFFICIAL' };
 });
 
-test('LGU administrators, residents, unassigned and foreign officials cannot change report decisions',async()=>{
+test('Residents, unassigned and foreign officials cannot change report decisions',async()=>{
   const original=actor;
   try {
-    for(const next of [{role:'LGU_ADMIN',barangayId:'borol_1st'},{role:'RESIDENT',barangayId:'borol_1st'},{role:'BARANGAY_OFFICIAL',barangayId:null},{role:'BARANGAY_OFFICIAL',barangayId:'wawa'}]) {
+    for(const next of [{role:'RESIDENT',barangayId:'borol_1st'},{role:'BARANGAY_OFFICIAL',barangayId:null},{role:'BARANGAY_OFFICIAL',barangayId:'wawa'}]) {
       actor={...original,...next};saved={status:'Pending',verification:'Pending'};
       const before=writes;
       for(const status of ['Verified','Rejected','Pending'])assert.equal((await update(status)).status,403);
@@ -55,4 +55,23 @@ test('LGU administrators, residents, unassigned and foreign officials cannot cha
       assert.equal(writes,before);assert.equal(saved.status,'Pending');
     }
   } finally {actor=original;}
+});
+
+test('LGU administrators can verify directly without a barangay assignment',async()=>{
+ const original=actor;try {actor={...actor,role:'LGU_ADMIN',barangayId:null};saved={status:'Pending',verification:'Pending'};assert.equal((await update('Verified')).status,200);assert.equal(saved.status,'Verified');}finally{actor=original;}
+});
+
+test('individual report endpoints cannot leave an incident partially resolved or rejected', async () => {
+  const original = actor;
+  try {
+    actor = { ...actor, role: 'LGU_ADMIN', barangayId: null };
+    saved = { status: 'Verified', verification: 'Verified', incidentId: 'existing-incident' };
+    const previousWrites = writes;
+    for (const status of ['Resolved', 'Rejected', 'Pending', 'Verified']) {
+      const response = await update(status);
+      assert.equal(response.status, 409);
+      assert.match((await response.json()).error, /incident/);
+    }
+    assert.equal(writes, previousWrites); assert.equal(saved.status, 'Verified');
+  } finally { actor = original; }
 });

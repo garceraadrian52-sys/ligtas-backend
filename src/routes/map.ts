@@ -92,7 +92,8 @@ router.get('/monitoring', async (req: AuthenticatedRequest, res) => {
     }).map(report => {
       return { id: report.id, location: report.location, description: report.description,
         status: report.status, verification: report.verification, latitude: report.latitude,
-        longitude: report.longitude, locationPoint: report.locationPoint, coordinates: report.coordinates };
+        incidentId: report.incidentId || null, incidentReportCount: report.incidentReportCount || 0, incidentReportIds: report.incidentReportIds || [],
+        priority: report.priority, createdAt: report.createdAt, longitude: report.longitude, locationPoint: report.locationPoint, coordinates: report.coordinates };
     });
     res.json({
       data: {

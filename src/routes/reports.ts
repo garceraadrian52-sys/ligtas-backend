@@ -1,3 +1,4 @@
+import { changeReportIncident, IncidentError, suggestRelatedReports } from '../services/reportIncidents';
 import { Router } from 'express';
 import { submitLocatedReport, ReportSubmissionError } from '../services/reportSubmission';
 import { db } from '../config/firebaseAdmin';
@@ -39,6 +40,26 @@ router.get('/', async (req: AuthenticatedRequest, res) => {
   }
 });
 
+// Related reports are suggestions only; membership is committed by the incident transaction.
+router.get('/:id/related', async (req: AuthenticatedRequest, res) => {
+  try {
+    const reports = await listReports(isMunicipalityAdmin(req.user!.role) ? null : req.user!.barangayId);
+    const anchor = reports.find(report => report.id === req.params.id);
+    if (!anchor) return res.status(404).json({ error: 'Report not found.' });
+    res.json({ data: suggestRelatedReports(anchor, reports, req.user!) });
+  } catch (error) {
+    if (error instanceof IncidentError) return res.status(error.status).json({ error: error.message });
+    res.status(503).json({ error: 'Related reports are temporarily unavailable.' });
+  }
+});
+router.post('/:id/incident', async (req: AuthenticatedRequest, res) => {
+  try { res.json({ data: await changeReportIncident(req.user!, String(req.params.id), req.body || {}) }); }
+  catch (error) {
+    if (error instanceof IncidentError) return res.status(error.status).json({ error: error.message });
+    res.status(503).json({ error: 'The incident could not be saved. Refresh before retrying.' });
+  }
+});
+
 // GET /reports/:id
 router.get('/:id', async (req: AuthenticatedRequest, res) => {
   try {
@@ -63,9 +84,8 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
   const { status } = req.body ?? {};
   const resolving = status === 'Resolved';
   const municipalityAdmin = isMunicipalityAdmin(req.user!.role);
-  const superAdmin = req.user!.role === 'SUPER_ADMIN';
-  if (resolving ? !municipalityAdmin : !superAdmin && (req.user!.role !== 'BARANGAY_OFFICIAL' || !req.user!.barangayId)) {
-    return res.status(403).json({ error: resolving ? 'Only municipality administrators can mark a report as Resolved.' : 'Only Super Admin or the assigned Barangay Official can review reports.' });
+  if (resolving ? !municipalityAdmin : !municipalityAdmin && (req.user!.role !== 'BARANGAY_OFFICIAL' || !req.user!.barangayId)) {
+    return res.status(403).json({ error: resolving ? 'Only municipality administrators can mark a report as Resolved.' : 'Only a municipality administrator or the assigned Barangay Official can review reports.' });
   }
   if (!['Pending', 'Verified', 'Rejected', 'Resolved'].includes(status)) {
     return res.status(400).json({ error: 'status must be Pending, Verified, Rejected, or Resolved.' });
@@ -80,9 +100,10 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
       if (!snapshot.exists) throw new Error('NOT_FOUND');
 
       const data = snapshot.data()!;
-      if (!resolving && !superAdmin && data.barangayId !== req.user!.barangayId) {
+      if (!resolving && !municipalityAdmin && data.barangayId !== req.user!.barangayId) {
         throw new Error('FORBIDDEN');
       }
+      if (data.incidentId) throw new Error('GROUPED_REPORT');
 
       // Retrying the same decision must not restart measured response times.
       if (data.status === status && data.verification === status) { changed = false; return; }
@@ -145,6 +166,7 @@ router.patch('/:id', async (req: AuthenticatedRequest, res) => {
 
     res.json({ data: { id: updated.id, ...updatedData } });
   } catch (error: any) {
+    if (error.message === 'GROUPED_REPORT') return res.status(409).json({ error: 'Manage this grouped report through its incident, or ungroup it first.' });
     if (error.message === 'NOT_FOUND') return res.status(404).json({ error: 'Report not found.' });
     if (error.message === 'FORBIDDEN') return res.status(403).json({ error: 'This report belongs to another barangay.' });
     if (error.message === 'NOT_VERIFIED') return res.status(409).json({ error: 'Verify the report before marking it resolved.' });

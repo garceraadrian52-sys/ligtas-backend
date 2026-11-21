@@ -40,8 +40,8 @@ export function evacuationAnalytics(centers: Row[] | null, active: Row[] | null,
     utilizationMaximum:Math.max(100,...utilization.map(item=>item.percentage ?? 0)),
     sourceNote:'Current active household members, grouped by the household barangay. Center occupancy is reported separately; the two sources may require reconciliation.' };
 }
-export function buildAnalyticsOverview(reports: Row[], centers: Row[] | null, active: Row[] | null, barangays: Barangay[], scopeLabel: string, options: { month?:string; now?:number } = {}) {
-  const floods = reports.filter(row => reportType(row) === 'flood');
+export function buildAnalyticsOverview(reports: Row[], centers: Row[] | null, active: Row[] | null, barangays: Barangay[], scopeLabel: string, options: { month?:string; now?:number; reportType?:string } = {}) {
+  const floods = options.reportType && options.reportType !== 'flood' ? reports : reports.filter(row => reportType(row) === 'flood');
   const summary = summarizeReportAnalytics(floods, { ...options, barangays });
   const view = presentReportAnalytics(summary, scopeLabel);
   const roads = summarizeReportAnalytics(reports.filter(row=>reportType(row)==='road'), { ...options, barangays });

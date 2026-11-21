@@ -158,3 +158,24 @@ test('legacy duplicate review after checkout resolves without checking the house
   assert.equal(result.status, 'already_processed'); assert.equal(result.addedCount, 0);
   assert.equal(occupied(), 0); assert.equal(attendance().length, 1);
 });
+
+test('individual checkout preserves original attendance and other members, retries decrement only once',async()=>{
+ await recordAttendance(store.db,'bo','center',input());const original=JSON.parse(JSON.stringify(store.records.get('evacuationRecords/request-1')));
+ const partial=await checkoutCenterAttendance(store.db,'bo','center','request-1',['manual-maria']);assert.equal(partial.status,'partially_checked_out');assert.equal(occupied(),1);
+ const saved=store.records.get('evacuationRecords/request-1');assert.equal(saved.status,'checked_in');assert.deepEqual(saved.memberIds,original.memberIds);assert.deepEqual(saved.memberNames,original.memberNames);assert.equal(saved.peopleCount,2);assert.ok(saved.memberCheckouts['manual-maria'].checkedOutAt);assert.deepEqual(store.records.get('activeEvacuations/H-DELACRUZ').memberIds,['manual-ana']);
+ await checkoutCenterAttendance(store.db,'bo','center','request-1',['manual-maria']);assert.equal(occupied(),1);
+ const active=await listCenterAttendance(store.db,'bo');assert.deepEqual(active.find(row=>row.id==='request-1').memberIds,['manual-ana']);
+ await checkoutCenterAttendance(store.db,'bo','center','request-1');assert.equal(occupied(),0);assert.equal(saved.peopleCount,2);assert.equal(store.records.get('evacuationRecords/request-1').status,'checked_out');
+});
+test('partial checkout rejects foreign members, invalid selections and unauthorized actors without changing attendance',async()=>{
+ await recordAttendance(store.db,'bo','center',input());
+ for(const ids of [[],['manual-maria','manual-maria'],['unknown']])await assert.rejects(async()=>checkoutCenterAttendance(store.db,'bo','center','request-1',ids),error=>error.status===400);
+ for(const uid of ['resident','outsider','disabled'])await assert.rejects(checkoutCenterAttendance(store.db,uid,'center','request-1',['manual-maria']),error=>error.status===403);
+ assert.equal(occupied(),2);assert.equal(store.records.get('evacuationRecords/request-1').memberCheckouts,undefined);
+});
+
+test('a rechecked-in member stays active when remaining members of the older attendance are checked out',async()=>{
+ await recordAttendance(store.db,'bo','center',input());await checkoutCenterAttendance(store.db,'bo','center','request-1',['manual-maria']);
+ await recordAttendance(store.db,'bo','center',input('new-check-in',['manual-maria']));assert.equal(occupied(),2);
+ await checkoutCenterAttendance(store.db,'bo','center','request-1');assert.equal(occupied(),1);assert.deepEqual(store.records.get('activeEvacuations/H-DELACRUZ').memberIds,['manual-maria']);assert.equal(store.records.get('evacuationRecords/new-check-in').status,'checked_in');assert.deepEqual(store.records.get('evacuationRecords/request-1').memberIds,['manual-maria','manual-ana']);
+});

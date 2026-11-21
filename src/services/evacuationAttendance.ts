@@ -152,12 +152,16 @@ export function recordAttendance(db: Firestore, uid: string, centerId: string, b
     return result;
   });
 }
-export function checkoutCenterAttendance(db: Firestore, uid: string, centerId: string, recordId: string) {
+export function checkoutCenterAttendance(db: Firestore, uid: string, centerId: string, recordId: string, selectedMemberIds?: unknown) {
   if (!validDocumentId(recordId)) fail(400, 'Choose a valid attendance record.');
+  if (selectedMemberIds !== undefined && (!Array.isArray(selectedMemberIds) || !selectedMemberIds.length || selectedMemberIds.length > 100 || selectedMemberIds.some(id => !validText(id,150)) || new Set(selectedMemberIds).size !== selectedMemberIds.length)) fail(400, 'Select distinct active household members.');
   return db.runTransaction(async tx => {
     const { center, centerRef, profile, role } = await operator(tx, db, uid, centerId);
     const recordRef = db.doc('evacuationRecords/' + recordId), record = (await tx.get(recordRef)).data();
     if (!record || record.evacuationCenterId !== centerId) fail(404, 'Attendance record not found at this center.');
+    const original: string[] = Array.isArray(record!.memberIds) ? record!.memberIds : [];
+    const requested = selectedMemberIds as string[] | undefined;
+    if (requested?.some(id => !original.includes(id))) fail(400, 'A selected member does not belong to this attendance record.');
     if (record!.status === 'checked_out') return { status: 'already_processed' };
     if (record!.status !== 'checked_in') fail(409, 'This attendance record is not checked in. No changes were made.');
     municipality(record!);
@@ -165,17 +169,26 @@ export function checkoutCenterAttendance(db: Firestore, uid: string, centerId: s
     if (!record!.manual) await household(tx, db, record!.householdId);
     const activeRef = db.doc('activeEvacuations/' + record!.householdId), active = (await tx.get(activeRef)).data();
     const { occupied } = totals(center);
-    const members: string[] = record!.memberIds ?? [], existing: string[] = active?.memberIds ?? [];
+    const remaining = original.filter(id => !Object.prototype.hasOwnProperty.call(record!.memberCheckouts || {}, id));
+    const members = requested ? remaining.filter(id => requested.includes(id)) : remaining;
+    if (!members.length) {
+      if (requested?.every(id => Object.prototype.hasOwnProperty.call(record!.memberCheckouts || {}, id))) return { status: 'already_processed' };
+      fail(409, 'Attendance totals need reconciliation by an administrator. No changes were made.');
+    }
+    const existing: string[] = active?.memberIds ?? [];
     if (!active || active.evacuationCenterId !== centerId || !Array.isArray(members) || !Array.isArray(existing)
-      || !members.length || members.length !== record!.peopleCount || new Set(members).size !== members.length
-      || new Set(existing).size !== existing.length || !members.every(id => existing.includes(id)) || occupied < members.length) fail(409, 'Attendance totals need reconciliation by an administrator. No changes were made.');
+      || original.length !== record!.peopleCount || new Set(original).size !== original.length
+      || new Set(existing).size !== existing.length || !remaining.every(id => existing.includes(id)) || occupied < members.length) fail(409, 'Attendance totals need reconciliation by an administrator. No changes were made.');
     const now = new Date(), next = occupied - members.length;
-    tx.update(recordRef, { status: 'checked_out', checkedOutAt: now, checkedOutBy: uid, updatedAt: now });
+    const fullyCheckedOut = members.length === remaining.length;
+    tx.update(recordRef, { status: fullyCheckedOut ? 'checked_out' : 'checked_in',
+      memberCheckouts: {...record!.memberCheckouts, ...Object.fromEntries(members.map(id=>[id,{checkedOutAt:now,checkedOutBy:uid}]))},
+      ...(fullyCheckedOut ? {checkedOutAt:now,checkedOutBy:uid} : {}), updatedAt: now });
     tx.update(activeRef, { memberIds: existing.filter(id => !members.includes(id)), lastAttendanceId: recordId, updatedAt: now });
     tx.update(centerRef, { occupied: next, currentOccupancy: next, occupancyCount: next, lastAttendanceId: recordId, updatedAt: now });
     tx.create(db.collection('auditLogs').doc(), auditRecord({ actorId: uid, actorName: String(profile.name ?? 'Official'), actorRole: role,
       actorBarangayId: profile.barangayId ?? null, action: 'evacuation_checkout', targetType: 'evacuationRecord', targetId: recordId, details: { centerId, peopleCount: members.length } }));
-    return { status: 'checked_out' };
+    return { status: fullyCheckedOut ? 'checked_out' : 'partially_checked_out', checkedOutCount: members.length };
   });
 }
 export async function listCenterAttendance(db: Firestore, uid: string) {
@@ -205,10 +218,12 @@ export async function listCenterAttendance(db: Firestore, uid: string) {
         : typeof value === 'string' ? Date.parse(value) : value);
       return typeof result === 'number' && Number.isFinite(result) ? result : null;
     };
+    const originalIds: string[]=Array.isArray(data.memberIds) ? data.memberIds : [];
+    const memberIds=data.status==='checked_out'?originalIds:originalIds.filter(id=>!Object.prototype.hasOwnProperty.call(data.memberCheckouts||{},id));
     return [{ id: item.id, householdId: data.householdId, householdName: data.householdName ?? 'Household',
       householdDisplayId: data.householdDisplayId ?? data.householdReference ?? null,
       evacuationCenterId: data.evacuationCenterId, evacuationCenter: data.evacuationCenter ?? data.centerName ?? '',
-      memberIds: data.memberIds ?? [], memberNames: data.memberNames ?? [], peopleCount: data.peopleCount ?? 0,
+      memberIds, memberNames: data.status==='checked_out'||!data.memberCheckouts ? data.memberNames??[] : memberIds.map(id=>(data.memberNames||[])[originalIds.indexOf(id)]||'Name not recorded'), peopleCount: data.status==='checked_out'||!data.memberCheckouts?data.peopleCount??0:memberIds.length,
       status: data.status ?? 'checked_in', recordedBy: data.recordedBy ?? null,
       recordedAt: millis(data.observedAt) ?? millis(data.recordedAt) ?? millis(data.createdAt) }];
   });
