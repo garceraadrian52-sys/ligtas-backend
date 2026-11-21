@@ -8,8 +8,26 @@ import { respondToFirestoreResourceExhausted } from '../services/firestoreErrors
 import { allocateDisplayId } from '../services/recordDisplayIds';
 import { logActionInTransaction } from '../services/auditLog';
 import { invalidateFirestoreReadCache } from '../services/firestoreReadCache';
+import { AttendanceError, attendanceHousehold, recordAttendance, checkoutCenterAttendance, listCenterAttendance } from '../services/evacuationAttendance';
 const router = Router();
 router.use(requireAuth, requireOfficial);
+
+async function attendanceOperation(res: any, run: () => Promise<unknown>) {
+  try { res.json({ data: await run() }); }
+  catch (error) {
+    if (error instanceof AttendanceError) return res.status(error.status).json({ error: error.message, code: error.code });
+    if (respondToFirestoreResourceExhausted(res, error)) return;
+    res.status(503).json({ error: 'Attendance could not be synchronized. Your saved record can be retried.', code: 'unavailable' });
+  }
+}
+router.get('/attendance', (req: AuthenticatedRequest, res) =>
+  attendanceOperation(res, () => listCenterAttendance(db, req.user!.uid)));
+router.post('/:id/household', (req: AuthenticatedRequest, res) =>
+  attendanceOperation(res, () => attendanceHousehold(db, req.user!.uid, String(req.params.id), req.body?.reference)));
+router.post('/:id/attendance', (req: AuthenticatedRequest, res) =>
+  attendanceOperation(res, () => recordAttendance(db, req.user!.uid, String(req.params.id), req.body)));
+router.post('/:id/attendance/:recordId/checkout', (req: AuthenticatedRequest, res) =>
+  attendanceOperation(res, () => checkoutCenterAttendance(db, req.user!.uid, String(req.params.id), String(req.params.recordId))));
 
 function timestampVersion(value: any): string | null {
   if (value === null || value === undefined) return null;

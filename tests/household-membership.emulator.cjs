@@ -62,7 +62,7 @@ test('official QR attendance uses stable member IDs after approval and keeps his
   const { readFileSync } = require('node:fs');
   const path = require('node:path');
   const vm = require('node:vm');
-  const mobile = path.resolve(__dirname, '../../ligtas-mobile');
+  const mobile = process.env.LIGTAS_MOBILE_PATH || path.resolve(__dirname, '../../ligtas-mobile');
   const ts = require(path.join(mobile, 'node_modules/typescript'));
   const firestore = require(path.join(mobile, 'node_modules/firebase/firestore'));
   const { initializeTestEnvironment, assertFails } = require(path.join(mobile, 'node_modules/@firebase/rules-unit-testing'));
@@ -78,26 +78,30 @@ test('official QR attendance uses stable member IDs after approval and keeps his
     return exports;
   };
   const validation = load('src/services/validation.ts');
-  const plan = load('src/services/attendanceValidation.ts');
-  const centerMetrics = load('src/services/evacuationCenterMetrics.ts');
+  const attendanceService = require('../dist/services/evacuationAttendance');
   let save;
   const attendance = load('src/services/attendance.ts', {
     'firebase/firestore': firestore, '@/services/firebase': { db: client, auth: { currentUser: { uid: 'official' } } },
     '@/services/outbox': { registerOutboxHandler: (kind, callback) => { assert.equal(kind, 'checkin'); save = callback; } },
-    '@/services/attendanceValidation': plan, '@/services/readTimeout': { readWithTimeout: promise => promise }, '@/services/validation': validation,
-    '@/services/evacuationCenterMetrics': centerMetrics,
+    '@/services/readTimeout': { readWithTimeout: promise => promise }, '@/services/validation': validation,
+    '@react-native-async-storage/async-storage': { getItem: async () => null, setItem: async () => {} },
+    '@/services/backendOperation': { backendOperation: (url, body) => {
+      if (url.endsWith('/checkout')) return attendanceService.checkoutCenterAttendance(db, 'official', url.split('/')[1], url.split('/')[3]);
+      return attendanceService.recordAttendance(db, 'official', url.split('/')[1], body);
+    } },
   });
   try {
     await Promise.all([
       db.doc('users/official').set({ role: 'BARANGAY_OFFICIAL', name: 'Official', barangayId: 'wawa' }),
       db.doc('users/admin').set({ role: 'LGU_ADMIN', name: 'Admin' }),
-      db.doc('evacuationCenters/center').set({ capacity: 10, occupied: 0, currentOccupancy: 0, occupancyCount: 0, status: 'OPEN' }),
+      db.doc('barangays/wawa').set({ name: 'Wawa' }),
+      db.doc('evacuationCenters/center').set({ barangayId: 'wawa', capacity: 10, occupied: 0, currentOccupancy: 0, occupancyCount: 0, status: 'OPEN' }),
     ]);
     const householdId = validation.parseHouseholdQr(validation.householdQr('H-ABCDE'));
     const recordRef = firestore.doc(client, 'evacuationRecords', 'before-join');
     const payload = { householdId, evacuationCenterId: 'center', evacuationCenter: 'Center', memberIds: ['original-maria'], memberNames: ['Maria Dela Cruz'] };
     await save({ id: 'before-join', ownerId: 'official', createdAt: new Date().toISOString(), payload });
-    await attendance.checkoutAttendance('before-join');
+    await attendance.checkoutAttendance('before-join', 'center');
     const history = (await firestore.getDoc(recordRef)).data();
     const request = await requestMembership(db, householdId, 'maria', { memberId: 'original-maria' });
     await decideMembership(db, request.id, 'head', true, true);
@@ -108,9 +112,9 @@ test('official QR attendance uses stable member IDs after approval and keeps his
     await save({ id: 'after-join', ownerId: 'official', createdAt: new Date().toISOString(), payload: { ...payload, memberIds: ['original-maria', 'original-ana'], memberNames: ['Maria Dela Cruz', 'Ana'] } });
     assert.deepEqual((await db.doc('evacuationRecords/after-join').get()).get('memberIds'), ['original-maria', 'original-ana']);
     assert.equal((await db.doc('evacuationCenters/center').get()).get('occupied'), 2);
-    await save({ id: 'after-join', ownerId: 'official', createdAt: new Date().toISOString(), payload });
+    await save({ id: 'after-join', ownerId: 'official', createdAt: new Date().toISOString(), payload: { ...payload, memberIds: ['original-maria', 'original-ana'], memberNames: ['Maria Dela Cruz', 'Ana'] } });
     assert.equal((await db.doc('evacuationCenters/center').get()).get('occupied'), 2);
-    await attendance.checkoutAttendance('after-join');
+    await attendance.checkoutAttendance('after-join', 'center');
     assert.equal((await db.doc('evacuationCenters/center').get()).get('occupied'), 0);
     assert.deepEqual((await firestore.getDoc(recordRef)).data(), history);
     assert.equal((await firestore.getDoc(firestore.doc(env.authenticatedContext('admin').firestore(), 'evacuationRecords', 'before-join'))).exists(), true);
