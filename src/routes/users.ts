@@ -10,6 +10,8 @@ import { allocateDisplayId } from '../services/recordDisplayIds';
 import { sendAccountRegistrationEmail } from '../services/accessRequestEmail';
 import { normalizeRole, SUPER_ADMIN_ROLE_VALUES } from '../services/roles';
 import { recordAuthenticatedActivity, recordAuthenticatedLogin, shouldTrackAuthenticatedActivity } from '../services/activityTracking';
+import type { DocumentReference, DocumentSnapshot } from 'firebase-admin/firestore';
+import type { UpdateRequest } from 'firebase-admin/auth';
 
 const router = Router();
 const accountRoles = ['SUPER_ADMIN', 'LGU_ADMIN', 'BARANGAY_OFFICIAL'] as const;
@@ -402,30 +404,93 @@ router.post('/:userId/password-reset', async (req: AuthenticatedRequest, res) =>
   }
 });
 
-// Status-only deactivation preserves profiles, report ownership, and account roles.
+// Serialize local status changes; the transaction also rejects stale edits from other instances.
+const accountAccessWrites = new Map<string, Promise<void>>();
+async function saveAccountAccess(reference: DocumentReference, snapshot: DocumentSnapshot,
+  updates: Record<string, unknown>, authUpdates: UpdateRequest, audit: Parameters<typeof logAction>[0]) {
+  const previous = accountAccessWrites.get(reference.id) ?? Promise.resolve();
+  let release!: () => void;
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const pending = previous.then(() => waiting);
+  accountAccessWrites.set(reference.id, pending);
+  await previous;
+  try {
+    const original = await auth.getUser(reference.id);
+    try {
+      // Leave the disabled profile in place until Authentication has accepted reactivation.
+      await auth.updateUser(reference.id, authUpdates);
+      if (updates.disabled === true) await auth.revokeRefreshTokens(reference.id);
+      await db.runTransaction(async transaction => {
+        const latest = await transaction.get(reference);
+        if (!latest.exists || !snapshot.updateTime?.isEqual(latest.updateTime!)) {
+          throw Object.assign(new Error('Account changed. Refresh before retrying.'), { code: 'account/status-conflict' });
+        }
+        if (normalizeRole(latest.data()?.role) === 'SUPER_ADMIN' &&
+          (updates.disabled === true || (updates.role !== undefined && updates.role !== 'SUPER_ADMIN'))) {
+          const admins = await transaction.get(db.collection('users').where('role', 'in', SUPER_ADMIN_ROLE_VALUES));
+          if (!admins.docs.some(doc => doc.id !== reference.id && normalizeRole(doc.data().role) === 'SUPER_ADMIN' && doc.data().disabled !== true)) {
+            throw Object.assign(new Error('Keep at least one active Super Admin account.'), { code: 'account/last-super-admin' });
+          }
+        }
+        transaction.update(reference, updates);
+        logActionInTransaction(transaction, audit);
+      });
+      invalidateFirestoreReadCache('auditLogs:');
+    } catch (error) {
+      try {
+        // A failed/ambiguous commit may already have persisted. Align Auth with the saved profile,
+        // rather than blindly restoring an old status over a newer successful operation.
+        const persisted = await reference.get().catch(() => undefined);
+        const profile = persisted?.data();
+        await auth.updateUser(reference.id, {
+          disabled: persisted ? !persisted.exists || profile?.disabled === true : original.disabled,
+          ...(authUpdates.displayName !== undefined ? { displayName: profile?.displayName ?? profile?.name ?? original.displayName ?? null } : {}),
+          ...(authUpdates.photoURL !== undefined ? { photoURL: firebaseAuthPhotoUrl(profile?.photoURL) ?? original.photoURL ?? null } : {}),
+        });
+        if (!persisted) throw new Error('Persisted account status is unavailable.');
+      } catch (rollbackError) {
+        console.error('Account status recovery unavailable:', errorCode(rollbackError) ?? 'unknown');
+        throw Object.assign(new Error('Account status could not be confirmed. Contact an administrator before retrying.'), { code: 'account/status-sync-failed' });
+      }
+      throw error;
+    }
+  } finally {
+    release();
+    if (accountAccessWrites.get(reference.id) === pending) accountAccessWrites.delete(reference.id);
+  }
+}
+
+// Status-only changes preserve profiles, report ownership, and account roles.
 router.patch('/:userId/status', async (req: AuthenticatedRequest, res) => {
-  if (!['SUPER_ADMIN', 'LGU_ADMIN'].includes(req.user!.role)) return res.status(403).json({ error: 'Only municipality administrators can deactivate accounts.' });
+  if (!['SUPER_ADMIN', 'LGU_ADMIN'].includes(req.user!.role)) return res.status(403).json({ error: 'Only municipality administrators can change account status.' });
   const userId = req.params.userId;
   if (!validDocumentId(userId)) return res.status(400).json({ error: 'Invalid user ID.' });
   const body = req.body;
-  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || body.disabled !== true) return res.status(400).json({ error: 'Only account deactivation is accepted. Send disabled: true.' });
-  if (userId === req.user!.uid) return res.status(400).json({ error: 'You cannot deactivate your own account.' });
+  if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.disabled !== 'boolean') return res.status(400).json({ error: 'Send only a boolean disabled value.' });
+  if (body.disabled === false && req.user!.role !== 'SUPER_ADMIN') return res.status(403).json({ error: 'Only Super Admin can reactivate accounts.' });
+  if (userId === req.user!.uid) return res.status(400).json({ error: 'You cannot change your own account status.' });
   try {
     const userRef = db.doc('users/' + userId);
     const snapshot = await userRef.get();
     if (!snapshot.exists) return res.status(404).json({ error: 'User not found.' });
     const current = snapshot.data()!;
     const role = directoryRole(current.role);
-    if (role !== 'RESIDENT' && !(role === 'BARANGAY_OFFICIAL' && req.user!.role === 'SUPER_ADMIN')) return res.status(403).json({ error: 'You cannot deactivate this account from this action.' });
-    await auth.updateUser(userId, { disabled: true });
-    await auth.revokeRefreshTokens(userId);
-    await userRef.update({ disabled: true, updatedAt: new Date() });
-    await writeAudit(req, 'user_deactivated', userId, { role, previouslyDisabled: current.disabled === true });
-    res.json({ data: { id: userId, disabled: true } });
+    if (!role || (req.user!.role !== 'SUPER_ADMIN' && role !== 'RESIDENT')) return res.status(403).json({ error: 'You cannot change this account status.' });
+    if (role === 'SUPER_ADMIN' && body.disabled === true && await countOtherActiveSuperAdmins(userId) === 0) return res.status(409).json({ error: 'Keep at least one active Super Admin account.' });
+    await saveAccountAccess(userRef, snapshot, { disabled: body.disabled, updatedAt: new Date() }, { disabled: body.disabled }, {
+      actorId: req.user!.uid, actorName: req.user!.name, actorRole: req.user!.role,
+      actorBarangayId: req.user!.barangayId, action: body.disabled ? 'user_deactivated' : 'user_activated',
+      targetType: 'user', targetId: userId, details: { role, disabled: body.disabled, previouslyDisabled: current.disabled === true },
+    });
+    res.json({ data: { id: userId, disabled: body.disabled } });
   } catch (error) {
-    console.error('Deactivate user failed:', error);
+    console.error('Change account status failed:', errorCode(error) ?? 'unknown');
+    if (errorCode(error) === 'auth/user-not-found') return res.status(404).json({ error: 'Firebase Authentication account not found. No profile changes were made.' });
+    if (errorCode(error) === 'account/status-conflict') return res.status(409).json({ error: 'Account changed. Refresh before retrying.' });
+    if (errorCode(error) === 'account/last-super-admin') return res.status(409).json({ error: 'Keep at least one active Super Admin account.' });
+    if (errorCode(error) === 'account/status-sync-failed') return res.status(503).json({ error: 'Account status could not be confirmed. Contact an administrator before retrying.' });
     if (respondToFirestoreResourceExhausted(res, error)) return;
-    res.status(500).json({ error: 'Failed to deactivate account. Please retry.' });
+    res.status(500).json({ error: 'Failed to change account status. Please refresh and retry.' });
   }
 });
 
@@ -465,18 +530,30 @@ router.patch('/:userId', async (req: AuthenticatedRequest, res) => {
     if (phone !== undefined) updates.phone = phone.trim();
     if (photoURL !== undefined) updates.photoURL = photoURL;
     if (disabled !== undefined) updates.disabled = disabled;
-    const authUpdates: Record<string, unknown> = {};
+    const authUpdates: UpdateRequest = {};
     if (name !== undefined) authUpdates.displayName = name.trim();
     const hostedPhotoURL = firebaseAuthPhotoUrl(photoURL);
     if (hostedPhotoURL) authUpdates.photoURL = hostedPhotoURL;
     if (disabled !== undefined) authUpdates.disabled = disabled;
-    if (Object.keys(authUpdates).length) await auth.updateUser(userId, authUpdates);
-    await userRef.update(updates);
-    await writeAudit(req, nextRole !== current.role ? 'user_role_changed' : disabled === true && current.disabled !== true ? 'user_deactivated' : disabled === false && current.disabled === true ? 'user_activated' : 'user_updated', userId, { email: current.email, previousRole: current.role, role: nextRole, disabled: disabled ?? current.disabled ?? false, barangayId: nextBarangay ?? null });
+    const action = nextRole !== current.role ? 'user_role_changed' : disabled === true && current.disabled !== true ? 'user_deactivated' : disabled === false && current.disabled === true ? 'user_activated' : 'user_updated';
+    const details = { previousRole: current.role, role: nextRole, disabled: disabled ?? current.disabled ?? false, barangayId: nextBarangay ?? null };
+    if (disabled !== undefined) {
+      await saveAccountAccess(userRef, snapshot, updates, authUpdates, {
+        actorId: req.user!.uid, actorName: req.user!.name, actorRole: req.user!.role,
+        actorBarangayId: req.user!.barangayId, action, targetType: 'user', targetId: userId, details,
+      });
+    } else {
+      if (Object.keys(authUpdates).length) await auth.updateUser(userId, authUpdates);
+      await userRef.update(updates);
+      await writeAudit(req, action, userId, details);
+    }
     const updated = await userRef.get();
     res.json({ data: { id: updated.id, ...updated.data() } });
   } catch (error) {
     console.error('Update user failed:', error);
+    if (errorCode(error) === 'account/status-conflict') return res.status(409).json({ error: 'Account changed. Refresh before retrying.' });
+    if (errorCode(error) === 'account/last-super-admin') return res.status(409).json({ error: 'Keep at least one active Super Admin account.' });
+    if (errorCode(error) === 'account/status-sync-failed') return res.status(503).json({ error: 'Account status could not be confirmed. Contact an administrator before retrying.' });
     if ((error as any)?.code === 'auth/email-already-exists') return res.status(409).json({ error: 'This email is already registered.' });
     if ((error as any)?.code === 'auth/invalid-email') return res.status(400).json({ error: 'Enter a valid email address.' });
     if (respondToFirestoreResourceExhausted(res, error)) return;

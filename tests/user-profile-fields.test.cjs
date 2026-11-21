@@ -11,19 +11,21 @@ const db = {
     if (path === 'systemSettings/superAdminBootstrap') return {};
     assert.equal(path, 'users/target-user');
     return {
-      async get() { return { id: 'target-user', exists: true, data: () => ({ ...account }) }; },
+      id: 'target-user',
+      async get() { return { id: 'target-user', exists: true, updateTime: { isEqual: () => true }, data: () => ({ ...account }) }; },
       async update(changes) { writes++; account = { ...account, ...changes }; },
     };
   },
+  async runTransaction(callback) { return callback({ get: ref => ref.get(), update: (_ref, changes) => { writes++; account = { ...account, ...changes }; } }); },
 };
 
 require.cache[require.resolve('../dist/config/firebaseAdmin')] = {
-  exports: { db, auth: { updateUser: async (_uid, changes) => { authUpdate = changes; if (authFailure) throw authFailure; } } },
+  exports: { db, auth: { getUser: async () => ({ ...account }), updateUser: async (_uid, changes) => { authUpdate = changes; if (authFailure) throw authFailure; } } },
 };
 require.cache[require.resolve('../dist/middleware/auth')] = {
   exports: { requireAuth(req, _res, next) { req.user = { uid: 'admin-user', role: 'SUPER_ADMIN', name: 'Admin', email: 'admin@example.com' }; next(); } },
 };
-require.cache[require.resolve('../dist/services/auditLog')] = { exports: { logAction: async () => undefined } };
+require.cache[require.resolve('../dist/services/auditLog')] = { exports: { logAction: async () => undefined, logActionInTransaction: () => undefined } };
 
 const app = express();
 app.use(express.json());
