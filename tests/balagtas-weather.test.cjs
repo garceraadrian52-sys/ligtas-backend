@@ -80,3 +80,79 @@ test('API HTTP, JSON, timeout and empty-data failures remain unavailable and pro
   assert.equal(logs.length,4);assert.deepEqual(logs[0][1],{reason:'upstream-http',status:503});assert.equal(logs[2][1].reason,'timeout');
   assert.doesNotMatch(JSON.stringify(logs),/private|headers/);
 });
+
+const limited = retryAfter => ({ok:false,status:429,headers:new Headers(retryAfter===undefined?{}:{'Retry-After':retryAfter})});
+test('429 backoff grows exponentially to one hour and coalesces callers at every retry boundary',async t=>{
+  const logs=[];t.mock.method(console,'warn',(...args)=>logs.push(args));
+  let clock=now,calls=0;
+  const service=createBalagtasWeatherService(async()=>{calls++;return limited();},()=>clock);
+  for(const minutes of [1,2,4,8,16,32,60,60]){
+    const previousCalls=calls;
+    assert.ok((await Promise.all(Array.from({length:30},()=>service.get()))).every(value=>value===null));
+    assert.equal(calls,previousCalls+1);
+    clock+=minutes*60000-1;
+    assert.equal(await service.get(),null);
+    assert.equal(calls,previousCalls+1,'callers must not retry before the backoff deadline');
+    clock++;
+  }
+  assert.deepEqual(logs.map(log=>log[1].retryInSeconds),[60,120,240,480,960,1920,3600,3600]);
+  assert.ok(logs.every(log=>log[0]==='Balagtas weather refresh failed.'&&log[1].reason==='upstream-http'&&log[1].status===429));
+});
+
+test('429 respects Retry-After seconds and HTTP dates, including a server delay longer than the backoff cap',async t=>{
+  t.mock.method(console,'warn',()=>{});
+  for(const [header,delay] of [['900',900000],[new Date(now+20*60000).toUTCString(),20*60000],['7200',7200000]]){
+    let clock=now,calls=0;
+    const service=createBalagtasWeatherService(async()=>{calls++;return limited(header);},()=>clock);
+    assert.equal(await service.get(),null);
+    clock+=delay-1;
+    await Promise.all(Array.from({length:20},()=>service.get()));assert.equal(calls,1,header);
+    clock++;
+    await Promise.all([service.get(),service.get()]);assert.equal(calls,2,header);
+  }
+});
+
+test('short, missing, invalid or past Retry-After values cannot shorten the exponential backoff',async t=>{
+  t.mock.method(console,'warn',()=>{});
+  for(const header of [undefined,'','0','1','-10','1.5','not-a-date','9'.repeat(400),new Date(now-60000).toUTCString()]){
+    let clock=now,calls=0;
+    const service=createBalagtasWeatherService(async()=>{calls++;return limited(header);},()=>clock);
+    await service.get();clock+=59999;await service.get();assert.equal(calls,1);
+    clock++;await service.get();assert.equal(calls,2);
+    clock+=119999;await service.get();assert.equal(calls,2,`${header}: second limit must wait two minutes`);
+    clock++;await service.get();assert.equal(calls,3);
+  }
+});
+
+test('rate limiting retains real cached readings and their timestamps, but never extends the observation safety window',async t=>{
+  t.mock.method(console,'warn',()=>{});
+  let clock=now,calls=0,rateLimited=false;
+  const service=createBalagtasWeatherService(async()=>{calls++;return rateLimited?limited('10800'):{ok:true,json:async()=>payload()};},()=>clock);
+  const first=await service.get();
+  clock+=11*60000;rateLimited=true;
+  const stale=await service.get();assert.equal(stale.status,'stale');
+  for(const field of ['observedAt','retrievedAt','temperatureC','humidity','windKmh','visibilityKm','rain24hMm','condition','weatherCode']) assert.equal(stale[field],first[field],field);
+  assert.match(stale.error,/dated cached estimate/);
+  clock+=20*60000;
+  assert.equal((await service.get()).observedAt,first.observedAt);assert.equal(calls,2);
+  clock=now+2*3600000+1;
+  assert.equal(await service.get(),null);assert.equal(calls,2,'expired cache must not bypass the provider cooldown');
+});
+
+test('only a valid successful reading resets rate-limit backoff and restores the normal cache',async t=>{
+  const logs=[];t.mock.method(console,'warn',(...args)=>logs.push(args));
+  let clock=now,calls=0,mode='limited';
+  const service=createBalagtasWeatherService(async()=>{
+    calls++;
+    return mode==='limited'?limited():{ok:true,json:async()=>mode==='invalid'?{}:{...payload(),current:{...payload().current,time:clock/1000}}};
+  },()=>clock);
+  assert.equal(await service.get(),null);clock+=60000;
+  mode='invalid';assert.equal(await service.get(),null);clock+=60000;
+  mode='limited';assert.equal(await service.get(),null);
+  assert.equal(logs.at(-1)[1].retryInSeconds,120);
+  clock+=120000;mode='valid';const recovered=await service.get();assert.equal(recovered.status,'available');
+  const successCalls=calls;await service.get();assert.equal(calls,successCalls);
+  clock+=10*60000;mode='limited';const stale=await service.get();assert.equal(stale.status,'stale');
+  assert.equal(logs.at(-1)[1].retryInSeconds,60);
+  clock+=60000;mode='valid';assert.equal((await service.get()).status,'available');
+});

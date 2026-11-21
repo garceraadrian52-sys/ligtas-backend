@@ -39,24 +39,40 @@ export function normalizeWeather(payload: any, now = Date.now()) {
     note:'Model estimates for the fixed Balagtas location; not a local weather-station measurement.',error:null as string|null};
 }
 
+function retryAfterDelay(value: string | null | undefined, now: number): number {
+  if (!value) return 0;
+  const text=value.trim();
+  const delay=/^\d+$/.test(text)?Number(text)*1000:/[a-z]/i.test(text)?Date.parse(text)-now:NaN;
+  return Number.isFinite(delay)?Math.max(0,delay):0;
+}
+
 export function createBalagtasWeatherService(fetcher: typeof fetch = fetch, clock:()=>number=Date.now) {
   let cached:WeatherData|null=null;
   let retryAfter=0;
+  let rateLimitDelay=0;
   let inFlight:Promise<WeatherData|null>|null=null;
   const fallback=()=>cached&&clock()-Date.parse(cached.observedAt)<=2*3600000 ? {...cached,status:'stale' as const,error:'Weather refresh unavailable; showing the dated cached estimate.'} : null;
   async function refresh() {
+    let upstreamRetryDelay=0;
     try {
       const response=await fetcher(weatherUrl(),{signal:AbortSignal.timeout(8000),headers:{Accept:'application/json'}});
+      if (response.status===429) upstreamRetryDelay=retryAfterDelay(response.headers?.get('Retry-After'),clock());
       if (!response.ok) throw Object.assign(new Error('Weather service unavailable.'),{status:response.status});
-      cached=normalizeWeather(await response.json(),clock());retryAfter=0;return cached;
+      cached=normalizeWeather(await response.json(),clock());retryAfter=0;rateLimitDelay=0;return cached;
     } catch (error) {
       // Do not log request headers, response bodies or credentials.
       const status=(error as {status?:unknown})?.status;
+      // Retry only on demand, doubling 429 cooldowns from one minute to one hour.
+      // A longer provider Retry-After must never be shortened by that cap.
+      if (status===429) rateLimitDelay=Math.min(rateLimitDelay?rateLimitDelay*2:60000,3600000);
+      const delay=status===429?Math.max(rateLimitDelay,upstreamRetryDelay):60000;
+      retryAfter=clock()+delay;
       console.warn('Balagtas weather refresh failed.', {
         reason:typeof status==='number'?'upstream-http':error instanceof Error && ['TimeoutError','AbortError'].includes(error.name)?'timeout':'invalid-response-or-network',
         ...(typeof status==='number'?{status}:{}),
+        ...(status===429?{retryInSeconds:Math.ceil(delay/1000)}:{}),
       });
-      retryAfter=clock()+60000;return fallback();
+      return fallback();
     }
     finally {inFlight=null;}
   }
