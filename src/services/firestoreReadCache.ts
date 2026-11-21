@@ -20,7 +20,7 @@ export async function cachedFirestoreRead<T>(key: string, load: () => Promise<T>
   pending.set(key, read);
   try {
     const value = await read;
-    if ((versions.get(key) ?? 0) === version && ttlMs > 0) {
+    if (pending.get(key) === read && (versions.get(key) ?? 0) === version && ttlMs > 0) {
       while (cache.size >= MAX_ENTRIES) {
         const oldest = cache.keys().next().value as string | undefined;
         if (oldest === undefined) break;

@@ -6,6 +6,7 @@ import { published, inArea, kindForAlert, enabled, retryDelay, alertRevision, em
 import { assignDisplayIdIfMissing } from './recordDisplayIds';
 import { MUNICIPAL_ADMIN_ROLE_VALUES, normalizeRole } from './roles';
 import { allowsAdminNotification } from './adminNotificationPreferences';
+import { invalidateReportReads } from './reportReads';
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const now = () => Timestamp.now();
@@ -202,6 +203,7 @@ let reportsReady = false;
 
 function startReportWatcher() {
   db.collection('reports').onSnapshot(async (snapshot) => {
+    invalidateReportReads();
     if (!reportsReady) {
       snapshot.docs.forEach((doc) => reportCache.set(doc.id, doc.data()));
       reportsReady = true;
